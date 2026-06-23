@@ -1,0 +1,6 @@
+# Workspace toolchain. Bumped to 1.93 because document-host depends on wasmtime 45,
+# which requires rustc >= 1.93 (the DocumentScript substrate plan §11.7-1 decision).
+# The wasm32-wasip2 target is for the document-core guest crates (built per-crate).
+[toolchain]
+channel = "1.93.0"
+targets = ["wasm32-wasip2"]
