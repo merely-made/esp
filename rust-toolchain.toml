@@ -4,5 +4,5 @@
 # minimum — no reason to hold back a release behind the floor.
 # The wasm32-wasip2 target is for the document-core guest crates (built per-crate).
 [toolchain]
-channel = "1.96.0"
+channel = "1.97.1"
 targets = ["wasm32-wasip2"]
