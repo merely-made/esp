@@ -1,7 +1,7 @@
 # Workspace toolchain. document-host depends on wasmtime 45 (rustc >= 1.93; the
 # DocumentScript substrate plan §11.7-1 decision), and a dependency in the graph now
-# requires rustc >= 1.95, so the floor moved up. Pinned to 1.96 rather than the bare
-# minimum — no reason to hold back a release behind the floor.
+# requires rustc >= 1.95, so the floor moved up. The channel below sits above the
+# bare minimum on purpose: there is no reason to hold a release behind the floor.
 # The wasm32-wasip2 target is for the document-core guest crates (built per-crate).
 [toolchain]
 channel = "1.97.1"
