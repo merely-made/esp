@@ -1,0 +1,108 @@
+//! The own llama-family decoder body (inference plan P1).
+//!
+//! HF-config-driven: [`config::DecoderConfig`] parses a HuggingFace
+//! `config.json` directly, so one body runs the open llama-family class
+//! (TinyLlama, Llama 3.2, SmolLM) from the standard artifact triple
+//! (`config.json` / `tokenizer.json` / `model.safetensors`) — the same
+//! triple `embed`'s BERT uses, and the byte shape the eidetic model
+//! corridor stores.
+//!
+//! Built from burn-nn primitives (`RmsNorm`, `RotaryEncoding`, `SwiGlu`)
+//! against the workspace burn pin; the GQA attention wiring in
+//! [`attention`] is the piece burn-nn does not provide, informed by
+//! tracel-ai/models' llama-burn (MIT OR Apache-2.0) as a reference
+//! implementation.
+//!
+//! Slice status: config + attention + layer + model stack + safetensors
+//! loader (this module). The KV-cached generation loop and the
+//! `InferenceProvider` impl are the next slices.
+
+pub mod attention;
+pub mod config;
+pub mod generate;
+pub mod layer;
+pub mod loader;
+pub mod model;
+pub mod provider;
+pub mod sample;
+pub mod tensors;
+
+pub use attention::{DecoderAttention, LayerKvCache};
+pub use config::DecoderConfig;
+pub use generate::{TokenPicker, generate_ids, generate_ids_with};
+pub use layer::{DecoderLayer, LoadedDecoderLayer};
+pub use loader::load_decoder_from_bytes;
+pub use model::{DecoderModel, KvCache, LoadedDecoder};
+pub use provider::DecoderProvider;
+pub use sample::Sampler;
+
+/// The decoder on the wgpu backend — the concrete inference lane hosts use
+/// so they never name `burn` themselves.
+#[cfg(feature = "decoder-wgpu")]
+pub type WgpuDecoderProvider = DecoderProvider<burn::backend::Wgpu<f32, i32>>;
+
+/// Load a llama-family checkpoint (HF artifact triple as bytes) on the wgpu
+/// backend. The host-facing entry point for real local inference.
+#[cfg(feature = "decoder-wgpu")]
+pub fn load_wgpu_provider(
+    config_bytes: &[u8],
+    tokenizer_bytes: &[u8],
+    weights_bytes: &[u8],
+    model_id: impl Into<String>,
+) -> Result<WgpuDecoderProvider, crate::infer::provider::InferError> {
+    DecoderProvider::from_bytes(
+        config_bytes,
+        tokenizer_bytes,
+        weights_bytes,
+        model_id,
+        "burn-wgpu",
+        &Default::default(),
+    )
+}
+
+/// Deterministic-weight helpers shared by the decoder tests: same values
+/// on every backend by construction (the `embed::bert::wgpu_parity`
+/// pattern).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use burn::tensor::backend::{Backend, BackendTypes};
+    use burn::tensor::{Tensor, TensorData};
+
+    use super::config::DecoderConfig;
+
+    pub fn det_vec(n: usize, salt: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (((i + salt * 7919) as f32) * 0.618_034).sin() * 0.05)
+            .collect()
+    }
+
+    pub fn t2<B: Backend>(
+        a: usize,
+        b: usize,
+        salt: usize,
+        dev: &<B as BackendTypes>::Device,
+    ) -> Tensor<B, 2> {
+        Tensor::from_data(TensorData::new(det_vec(a * b, salt), [a, b]), dev)
+    }
+
+    pub fn t1_ones<B: Backend>(n: usize, dev: &<B as BackendTypes>::Device) -> Tensor<B, 1> {
+        Tensor::ones([n], dev)
+    }
+
+    /// Tiny dims for fast tests: hidden 8, 4 heads (head_dim 2), GQA 2.
+    pub fn tiny_config() -> DecoderConfig {
+        DecoderConfig {
+            vocab_size: 32,
+            hidden_size: 8,
+            intermediate_size: 16,
+            num_hidden_layers: 2,
+            num_attention_heads: 4,
+            num_key_value_heads: Some(2),
+            max_position_embeddings: 16,
+            rms_norm_eps: 1.0e-5,
+            rope_theta: 10_000.0,
+            tie_word_embeddings: false,
+            eos_token_id: Vec::new(),
+        }
+    }
+}
