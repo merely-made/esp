@@ -54,11 +54,11 @@ workspace Cargo processes can regenerate the ignored target-specific lockfile.
   RTX 4060 Laptop adapters.
 - `mere-eidetic-search`: 12 library tests and 4 example tests passed.
 - `mere-embed` with `bert,bert-wgpu`: test targets compiled.
-- ESP 0.1.0: `cargo package --allow-dirty` packaged 54 files and verified the
-  extracted crate successfully.
-- Vates and Sibylla shims: all-feature workspace checks pass and their package
-  file lists are complete. Cargo correctly refuses final package resolution
-  until ESP 0.1.0 exists in the registry, enforcing the planned publish order.
+- ESP 0.1.0: packaged 54 files, verified the extracted crate, and published to
+  crates.io from clean commit `1283b4a8`.
+- Vates 0.1.2 and Sibylla 0.1.2: all-feature workspace checks passed; after ESP
+  became available, both packages resolved the registry release, verified
+  their extracted crates, and published to crates.io.
 
 Knot's ESP consumer compiled during E1. Its later full library-test run met a
 concurrent, unrelated borrow error in the new publication-client test at
@@ -67,7 +67,5 @@ was left untouched.
 
 ## Done boundary
 
-E0 through E3 are implemented. E4 is locally prepared through ESP package
-verification and shim compile/file-list checks. It completes only after the
-irreversible registry sequence: publish ESP 0.1.0, package and publish Vates
-0.1.2, then package and publish Sibylla 0.1.2.
+E0 through E4 are complete. The registry sequence completed on 2026-08-09:
+ESP 0.1.0, Vates 0.1.2, then Sibylla 0.1.2.
