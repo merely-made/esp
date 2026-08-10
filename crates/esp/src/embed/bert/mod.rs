@@ -43,7 +43,7 @@ pub use feed_forward::{BertIntermediate, BertOutput};
 pub use layer::BertLayer;
 pub use loader::{LoaderError, ModelArtifacts};
 pub use model::{BertModel, Pooling};
-pub use provider::{BertEmbeddingProvider, from_bytes_cpu, load_cpu};
 #[cfg(feature = "bert-wgpu")]
 pub use provider::load_wgpu;
+pub use provider::{BertEmbeddingProvider, from_bytes_cpu, load_cpu};
 pub use tokenizer::{BertTokenizer, EncodedBatch};

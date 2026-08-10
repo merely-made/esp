@@ -274,8 +274,10 @@ pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider
 /// register it rather than let Burn open a second one.
 #[cfg(feature = "bert-wgpu")]
 pub fn load_wgpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
-    let provider =
-        BertEmbeddingProvider::<burn::backend::Wgpu<f32, i32>>::load(model_dir, Default::default())?;
+    let provider = BertEmbeddingProvider::<burn::backend::Wgpu<f32, i32>>::load(
+        model_dir,
+        Default::default(),
+    )?;
     Ok(Box::new(provider))
 }
 
