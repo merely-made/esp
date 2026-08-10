@@ -78,9 +78,52 @@ pub trait EmbeddingProvider: Send + Sync {
     }
 }
 
+/// A boxed provider is a provider.
+///
+/// Without this, a consumer that picks its backend at runtime has to satisfy a
+/// generic bound with a concrete Burn type — which is precisely the accidental
+/// dependency the ESP-owned constructors exist to remove. With it, `Box<dyn
+/// EmbeddingProvider>` flows into everything generic over `P: EmbeddingProvider`.
+impl EmbeddingProvider for Box<dyn EmbeddingProvider> {
+    fn dimensions(&self) -> usize {
+        (**self).dimensions()
+    }
+
+    fn metric(&self) -> SimilarityMetric {
+        (**self).metric()
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        (**self).embed(texts)
+    }
+
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        (**self).embed_one(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::LexicalEmbeddingProvider;
+
+    #[test]
+    fn a_boxed_provider_satisfies_the_seam() {
+        let boxed: Box<dyn EmbeddingProvider> =
+            Box::new(LexicalEmbeddingProvider::new(64).unwrap());
+        // Both the trait's own methods and its defaulted one delegate.
+        assert_eq!(boxed.dimensions(), 64);
+        assert_eq!(boxed.metric(), SimilarityMetric::Cosine);
+        assert_eq!(boxed.embed_one("rust").unwrap().len(), 64);
+        assert_eq!(boxed.embed(&["rust", "async"]).unwrap().len(), 2);
+
+        // And it composes where a generic bound is expected, which is the
+        // whole point: no consumer needs to name a backend type to get here.
+        fn takes_provider<P: EmbeddingProvider>(p: P) -> usize {
+            p.dimensions()
+        }
+        assert_eq!(takes_provider(boxed), 64);
+    }
 
     #[test]
     fn metric_higher_is_better_classification() {

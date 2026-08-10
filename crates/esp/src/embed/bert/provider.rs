@@ -247,3 +247,56 @@ mod tests {
         assert_eq!(err, EmbedError::ModelNotLoaded);
     }
 }
+
+/// Load the BERT provider on the portable CPU backend, as the provider seam.
+///
+/// The reason this exists: without it, every consumer that merely wants a
+/// loaded model has to name `burn::backend::NdArray<f32>` to satisfy
+/// `BertEmbeddingProvider<B>` — and so has to depend on Burn directly, for no
+/// reason except spelling a type. Two integration consumers and one doctest had
+/// picked up that dependency by 2026-08-10.
+///
+/// Uses the backend's default device. The generic [`BertEmbeddingProvider`]
+/// stays public for the case this deliberately does not cover: a host that must
+/// register an **existing** device rather than take a fresh default one. That
+/// is a real requirement, not a workaround, which is why the generic API is not
+/// hidden behind this.
+pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
+    let provider =
+        BertEmbeddingProvider::<burn::backend::NdArray<f32>>::load(model_dir, Default::default())?;
+    Ok(Box::new(provider))
+}
+
+/// Load the BERT provider on the WebGPU backend, as the provider seam.
+///
+/// Same bargain as [`load_cpu`], and the same caveat about existing devices —
+/// which bites harder here, since a host with its own `wgpu` queue will want to
+/// register it rather than let Burn open a second one.
+#[cfg(feature = "bert-wgpu")]
+pub fn load_wgpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
+    let provider =
+        BertEmbeddingProvider::<burn::backend::Wgpu<f32, i32>>::load(model_dir, Default::default())?;
+    Ok(Box::new(provider))
+}
+
+/// Load the BERT provider on the CPU backend from artifact **bytes**, as the
+/// provider seam.
+///
+/// The companion to [`load_cpu`] for a caller whose model came out of a content
+/// store rather than a directory — eidetic's model-resolution path, which is
+/// the one consumer that needed it. There is deliberately no `_wgpu` twin: no
+/// consumer resolves bytes onto the GPU backend yet, and a constructor with no
+/// caller is a guess.
+pub fn from_bytes_cpu(
+    config_bytes: &[u8],
+    tokenizer_bytes: &[u8],
+    weights_bytes: &[u8],
+) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
+    let provider = BertEmbeddingProvider::<burn::backend::NdArray<f32>>::from_bytes(
+        config_bytes,
+        tokenizer_bytes,
+        weights_bytes,
+        Default::default(),
+    )?;
+    Ok(Box::new(provider))
+}
