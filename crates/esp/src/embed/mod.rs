@@ -34,6 +34,12 @@ pub mod index;
 #[cfg(feature = "index-burn")]
 pub mod index_burn;
 pub mod lexical;
+/// Save/load a [`VectorIndex`] through eidetic's typed-payload API. Homed
+/// here in the 2026-08-12 eidetic reorg, behind its own feature: it persists
+/// this module's own type, and gating it keeps esp's default tree serde-only
+/// for consumers that just compute embeddings.
+#[cfg(feature = "persistence")]
+pub mod persistence;
 pub mod provider;
 pub mod search;
 pub mod stub;
@@ -47,6 +53,10 @@ pub use index::{IndexError, VectorIndex};
 #[cfg(feature = "index-burn")]
 pub use index_burn::cosine_top_k;
 pub use lexical::LexicalEmbeddingProvider;
+#[cfg(feature = "persistence")]
+pub use persistence::{
+    VECTOR_INDEX_SCHEMA_REF, list_from_eidetic, load_from_eidetic, save_to_eidetic,
+};
 pub use provider::{EmbedError, EmbeddingProvider, SimilarityMetric};
 pub use search::{SearchError, SemanticSearch};
 pub use stub::StubEmbeddingProvider;

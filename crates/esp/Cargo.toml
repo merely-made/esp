@@ -12,6 +12,11 @@ categories = ["science", "api-bindings", "data-structures"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 
+# Typed-payload persistence for `embed::VectorIndex` (2026-08-12 eidetic
+# reorg). Optional, so the default tree stays serde-only and portable: a
+# consumer that only computes embeddings never links the store.
+eidetic = { package = "mere-eidetic", path = "../../eidetic/eidetic-core", version = "0.0.1", optional = true }
+
 # Inference actor. Optional so the default seam remains thread-free.
 armillary = { path = "../../armillary", version = "0.1.0", optional = true }
 
@@ -51,6 +56,8 @@ decoder = ["dep:burn", "dep:serde_json", "dep:safetensors", "dep:half", "dep:tok
 decoder-wgpu = ["decoder", "burn/wgpu"]
 
 # esp::embed
+# Save/load a VectorIndex through eidetic's typed-payload API.
+persistence = ["dep:eidetic"]
 index-burn = ["dep:burn", "dep:getrandom"]
 index-burn-wgpu = ["index-burn", "burn/wgpu"]
 bert = ["dep:burn", "dep:tokenizers", "dep:safetensors", "dep:serde_json", "dep:getrandom"]
