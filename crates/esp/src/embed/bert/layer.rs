@@ -11,21 +11,21 @@
 //! `intermediate`, `output` — names align with safetensors keys.
 
 use burn::module::Module;
-use burn::tensor::{Tensor, backend::Backend};
+use burn::tensor::{Device, Tensor};
 
 use super::attention::BertAttention;
 use super::config::BertConfig;
 use super::feed_forward::{BertIntermediate, BertOutput};
 
 #[derive(Module, Debug)]
-pub struct BertLayer<B: Backend> {
-    attention: BertAttention<B>,
-    intermediate: BertIntermediate<B>,
-    output: BertOutput<B>,
+pub struct BertLayer {
+    attention: BertAttention,
+    intermediate: BertIntermediate,
+    output: BertOutput,
 }
 
-impl<B: Backend> BertLayer<B> {
-    pub fn new(config: &BertConfig, device: &B::Device) -> Self {
+impl BertLayer {
+    pub fn new(config: &BertConfig, device: &Device) -> Self {
         Self {
             attention: BertAttention::new(config, device),
             intermediate: BertIntermediate::new(config, device),
@@ -35,8 +35,8 @@ impl<B: Backend> BertLayer<B> {
 
     pub fn from_loaded(
         config: &BertConfig,
-        loaded: &super::loaded::LoadedBertLayer<B>,
-        device: &B::Device,
+        loaded: &super::loaded::LoadedBertLayer,
+        device: &Device,
     ) -> Self {
         Self {
             attention: BertAttention::from_loaded(config, loaded, device),
@@ -47,7 +47,7 @@ impl<B: Backend> BertLayer<B> {
 
     /// Forward through one full transformer block.
     /// `[B, S, hidden]` → `[B, S, hidden]`.
-    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden: Tensor<3>) -> Tensor<3> {
         let attended = self.attention.forward(hidden);
         let expanded = self.intermediate.forward(attended.clone());
         self.output.forward(expanded, attended)
@@ -58,9 +58,8 @@ impl<B: Backend> BertLayer<B> {
 mod tests {
     use super::*;
     use crate::embed::bert::config::MINILM_L6_V2;
-    use burn::backend::NdArray;
-
-    type B = NdArray<f32>;
+    
+    // backend chosen per call site via Device
 
     fn config() -> BertConfig {
         let mut c = MINILM_L6_V2.clone();
@@ -68,15 +67,15 @@ mod tests {
         c
     }
 
-    fn rand(shape: [usize; 3]) -> Tensor<B, 3> {
-        let device = Default::default();
+    fn rand(shape: [usize; 3]) -> Tensor<3> {
+        let device = Device::ndarray();
         Tensor::random(shape, burn::tensor::Distribution::Normal(0.0, 1.0), &device)
     }
 
     #[test]
     fn layer_returns_input_shape() {
-        let device = Default::default();
-        let layer: BertLayer<B> = BertLayer::new(&config(), &device);
+        let device = Device::ndarray();
+        let layer: BertLayer = BertLayer::new(&config(), &device);
         let input = rand([2, 8, 384]);
         let out = layer.forward(input);
         assert_eq!(out.dims(), [2, 8, 384]);
@@ -84,8 +83,8 @@ mod tests {
 
     #[test]
     fn layer_no_nans_on_random_input() {
-        let device = Default::default();
-        let layer: BertLayer<B> = BertLayer::new(&config(), &device);
+        let device = Device::ndarray();
+        let layer: BertLayer = BertLayer::new(&config(), &device);
         let input = rand([1, 16, 384]);
         let out = layer.forward(input);
         let v = out.into_data().to_vec::<f32>().unwrap();
@@ -94,8 +93,8 @@ mod tests {
 
     #[test]
     fn layer_handles_long_sequence() {
-        let device = Default::default();
-        let layer: BertLayer<B> = BertLayer::new(&config(), &device);
+        let device = Device::ndarray();
+        let layer: BertLayer = BertLayer::new(&config(), &device);
         let input = rand([1, 128, 384]);
         let out = layer.forward(input);
         assert_eq!(out.dims(), [1, 128, 384]);

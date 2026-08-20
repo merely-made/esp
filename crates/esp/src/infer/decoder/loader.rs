@@ -7,9 +7,10 @@
 //! eidetic corridor's `ModelComponents.weight_bytes` feeds this directly
 //! (P2), and a file path is just `std::fs::read` above it.
 
-use burn::tensor::backend::Backend;
 use safetensors::SafeTensors;
 use safetensors::tensor::TensorView;
+
+use burn::tensor::Device;
 
 use super::config::DecoderConfig;
 use super::layer::LoadedDecoderLayer;
@@ -28,11 +29,11 @@ fn view<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>, 
 /// `lm_head.weight` may be absent when `config.tie_word_embeddings` is
 /// set (Llama 3.2 1B, SmolLM); a checkpoint that omits it *without* the
 /// config flag is rejected rather than silently tied.
-pub fn load_decoder_from_bytes<B: Backend>(
+pub fn load_decoder_from_bytes(
     config: &DecoderConfig,
     weights: &[u8],
-    device: &B::Device,
-) -> Result<DecoderModel<B>, InferError> {
+    device: &Device,
+) -> Result<DecoderModel, InferError> {
     let tensors = SafeTensors::deserialize(weights)
         .map_err(|e| InferError::InvalidWeights(format!("safetensors parse: {e}")))?;
 
@@ -127,11 +128,10 @@ pub fn load_decoder_from_bytes<B: Backend>(
 mod tests {
     use super::super::test_support::{det_vec, tiny_config};
     use super::*;
-    use burn::backend::NdArray;
-    use burn::tensor::{Int, Tensor};
+        use burn::tensor::{Int, Tensor};
     use safetensors::tensor::Dtype;
 
-    type B = NdArray<f32>;
+    // backend chosen per call site via Device
 
     /// The full name → (shape, values) table for `tiny_config`, values
     /// deterministic per tensor.
@@ -224,15 +224,15 @@ mod tests {
         safetensors::serialize(views, &None).unwrap()
     }
 
-    fn ids() -> Tensor<B, 2, Int> {
-        Tensor::from_data([[1, 5, 9, 2, 7]], &Default::default())
+    fn ids() -> Tensor<2, Int> {
+        Tensor::from_data([[1, 5, 9, 2, 7]], &Device::ndarray())
     }
 
     #[test]
     fn loads_synthetic_checkpoint_and_produces_logits() {
         let config = tiny_config();
         let bytes = serialize_f32(&tiny_tensor_table(&config, true));
-        let model = load_decoder_from_bytes::<B>(&config, &bytes, &Default::default()).unwrap();
+        let model = load_decoder_from_bytes(&config, &bytes, &Device::ndarray()).unwrap();
         let logits = model.logits(ids(), 0);
         assert_eq!(logits.dims(), [1, 5, config.vocab_size]);
         let v = logits.into_data().to_vec::<f32>().unwrap();
@@ -244,10 +244,10 @@ mod tests {
         let config = tiny_config();
         let table = tiny_tensor_table(&config, true);
         let f32_model =
-            load_decoder_from_bytes::<B>(&config, &serialize_f32(&table), &Default::default())
+            load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray())
                 .unwrap();
         let bf16_model =
-            load_decoder_from_bytes::<B>(&config, &serialize_bf16(&table), &Default::default())
+            load_decoder_from_bytes(&config, &serialize_bf16(&table), &Device::ndarray())
                 .unwrap();
         let a = f32_model
             .logits(ids(), 0)
@@ -272,7 +272,7 @@ mod tests {
         let mut config = tiny_config();
         config.tie_word_embeddings = true;
         let bytes = serialize_f32(&tiny_tensor_table(&config, false));
-        let model = load_decoder_from_bytes::<B>(&config, &bytes, &Default::default()).unwrap();
+        let model = load_decoder_from_bytes(&config, &bytes, &Device::ndarray()).unwrap();
         assert_eq!(model.logits(ids(), 0).dims(), [1, 5, config.vocab_size]);
     }
 
@@ -280,7 +280,7 @@ mod tests {
     fn missing_lm_head_without_tie_flag_rejected() {
         let config = tiny_config(); // tie_word_embeddings = false
         let bytes = serialize_f32(&tiny_tensor_table(&config, false));
-        let err = load_decoder_from_bytes::<B>(&config, &bytes, &Default::default()).unwrap_err();
+        let err = load_decoder_from_bytes(&config, &bytes, &Device::ndarray()).unwrap_err();
         assert!(matches!(err, InferError::InvalidWeights(_)));
     }
 
@@ -290,7 +290,7 @@ mod tests {
         let mut table = tiny_tensor_table(&config, true);
         table.retain(|(n, _, _)| n != "model.layers.1.mlp.up_proj.weight");
         let err =
-            load_decoder_from_bytes::<B>(&config, &serialize_f32(&table), &Default::default())
+            load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray())
                 .unwrap_err();
         match err {
             InferError::InvalidWeights(msg) => {

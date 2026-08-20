@@ -9,16 +9,18 @@
 //!     -- --ignored timing --nocapture
 //! ```
 
-use burn::backend::{NdArray, Wgpu};
-use burn::tensor::backend::{Backend, BackendTypes};
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 
 use super::config::{BertConfig, MINILM_L6_V2};
 use super::loaded::{LoadedBert, LoadedBertLayer, LoadedEmbeddings};
 use super::model::Pooling;
 
-type Cpu = NdArray<f32>;
-type Gpu = Wgpu<f32, i32>;
+fn cpu_device() -> Device {
+    Device::ndarray()
+}
+fn gpu_device() -> Device {
+    Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0))
+}
 
 /// Deterministic pseudo-weights: smooth, small, salt-separated so no two
 /// tensors are identical. Same values on every backend by construction.
@@ -28,24 +30,23 @@ fn det_vec(n: usize, salt: usize) -> Vec<f32> {
         .collect()
 }
 
-fn t1<B: Backend>(n: usize, salt: usize, dev: &<B as BackendTypes>::Device) -> Tensor<B, 1> {
+fn t1(n: usize, salt: usize, dev: &Device) -> Tensor<1> {
     Tensor::from_data(TensorData::new(det_vec(n, salt), [n]), dev)
 }
 
-fn t2<B: Backend>(
+fn t2(
     a: usize,
     b: usize,
     salt: usize,
-    dev: &<B as BackendTypes>::Device,
-) -> Tensor<B, 2> {
+    dev: &Device,
+) -> Tensor<2> {
     Tensor::from_data(TensorData::new(det_vec(a * b, salt), [a, b]), dev)
 }
 
 /// Deterministic sibling of `loaded.rs`'s test-only `synth_loaded`:
 /// identical structure, but values come from `det_vec` instead of the
 /// backend RNG so CPU and GPU builds carry the same weights.
-fn det_loaded<B: Backend>(config: &BertConfig) -> LoadedBert<B> {
-    let dev = <B as BackendTypes>::Device::default();
+fn det_loaded(config: &BertConfig, dev: &Device) -> LoadedBert {
     let h = config.hidden_size;
     let inter = config.intermediate_size;
     let mut salt = 0usize;
@@ -55,30 +56,30 @@ fn det_loaded<B: Backend>(config: &BertConfig) -> LoadedBert<B> {
     };
 
     let embeddings = LoadedEmbeddings {
-        word: t2(config.vocab_size, h, next(), &dev),
-        position: t2(config.max_position_embeddings, h, next(), &dev),
-        token_type: t2(config.type_vocab_size, h, next(), &dev),
-        ln_gamma: Tensor::<B, 1>::ones([h], &dev),
-        ln_beta: Tensor::<B, 1>::zeros([h], &dev),
+        word: t2(config.vocab_size, h, next(), dev),
+        position: t2(config.max_position_embeddings, h, next(), dev),
+        token_type: t2(config.type_vocab_size, h, next(), dev),
+        ln_gamma: Tensor::<1>::ones([h], dev),
+        ln_beta: Tensor::<1>::zeros([h], dev),
     };
     let layers = (0..config.num_hidden_layers)
         .map(|_| LoadedBertLayer {
-            q_w: t2(h, h, next(), &dev),
-            q_b: t1(h, next(), &dev),
-            k_w: t2(h, h, next(), &dev),
-            k_b: t1(h, next(), &dev),
-            v_w: t2(h, h, next(), &dev),
-            v_b: t1(h, next(), &dev),
-            attn_out_w: t2(h, h, next(), &dev),
-            attn_out_b: t1(h, next(), &dev),
-            attn_ln_gamma: Tensor::<B, 1>::ones([h], &dev),
-            attn_ln_beta: Tensor::<B, 1>::zeros([h], &dev),
-            inter_w: t2(h, inter, next(), &dev),
-            inter_b: t1(inter, next(), &dev),
-            out_w: t2(inter, h, next(), &dev),
-            out_b: t1(h, next(), &dev),
-            out_ln_gamma: Tensor::<B, 1>::ones([h], &dev),
-            out_ln_beta: Tensor::<B, 1>::zeros([h], &dev),
+            q_w: t2(h, h, next(), dev),
+            q_b: t1(h, next(), dev),
+            k_w: t2(h, h, next(), dev),
+            k_b: t1(h, next(), dev),
+            v_w: t2(h, h, next(), dev),
+            v_b: t1(h, next(), dev),
+            attn_out_w: t2(h, h, next(), dev),
+            attn_out_b: t1(h, next(), dev),
+            attn_ln_gamma: Tensor::<1>::ones([h], dev),
+            attn_ln_beta: Tensor::<1>::zeros([h], dev),
+            inter_w: t2(h, inter, next(), dev),
+            inter_b: t1(inter, next(), dev),
+            out_w: t2(inter, h, next(), dev),
+            out_b: t1(h, next(), dev),
+            out_ln_gamma: Tensor::<1>::ones([h], dev),
+            out_ln_beta: Tensor::<1>::zeros([h], dev),
         })
         .collect();
     LoadedBert {
@@ -104,12 +105,11 @@ fn tiny_config() -> BertConfig {
 }
 
 /// Run a sentence forward on backend `B` over a fixed token batch.
-fn sentence_on<B: Backend>(config: &BertConfig, ids: &[Vec<i32>]) -> Vec<f32> {
-    let dev = <B as BackendTypes>::Device::default();
-    let model = det_loaded::<B>(config).into_model(&dev);
+fn sentence_on(config: &BertConfig, ids: &[Vec<i32>], dev: &Device) -> Vec<f32> {
+    let model = det_loaded(config, dev).into_model(dev);
     let (batch, seq) = (ids.len(), ids[0].len());
     let flat: Vec<i32> = ids.iter().flatten().copied().collect();
-    let input_ids: Tensor<B, 2, Int> = Tensor::from_data(TensorData::new(flat, [batch, seq]), &dev);
+    let input_ids: Tensor<2, Int> = Tensor::from_data(TensorData::new(flat, [batch, seq]), dev);
     model
         .forward_sentence(input_ids, Pooling::Mean, true)
         .into_data()
@@ -131,8 +131,8 @@ fn token_batch(config: &BertConfig, batch: usize, seq: usize) -> Vec<Vec<i32>> {
 fn bert_sentence_parity_ndarray_wgpu() {
     let cfg = tiny_config();
     let ids = token_batch(&cfg, 3, 5);
-    let cpu = sentence_on::<Cpu>(&cfg, &ids);
-    let gpu = sentence_on::<Gpu>(&cfg, &ids);
+    let cpu = sentence_on(&cfg, &ids, &cpu_device());
+    let gpu = sentence_on(&cfg, &ids, &gpu_device());
     assert_eq!(cpu.len(), gpu.len());
     let max_diff = cpu
         .iter()
@@ -156,10 +156,10 @@ fn timing_bert_cpu_vs_gpu() {
     for (batch, seq) in [(1usize, 32usize), (8, 64), (32, 128)] {
         let ids = token_batch(&cfg, batch, seq);
 
-        let dev = <Cpu as BackendTypes>::Device::default();
-        let model = det_loaded::<Cpu>(&cfg).into_model(&dev);
+        let dev = cpu_device();
+        let model = det_loaded(&cfg, &dev).into_model(&dev);
         let flat: Vec<i32> = ids.iter().flatten().copied().collect();
-        let input: Tensor<Cpu, 2, Int> =
+        let input: Tensor<2, Int> =
             Tensor::from_data(TensorData::new(flat.clone(), [batch, seq]), &dev);
         let t = std::time::Instant::now();
         let _ = model
@@ -169,9 +169,9 @@ fn timing_bert_cpu_vs_gpu() {
             .unwrap();
         let cpu_us = t.elapsed().as_micros();
 
-        let dev = <Gpu as BackendTypes>::Device::default();
-        let model = det_loaded::<Gpu>(&cfg).into_model(&dev);
-        let input: Tensor<Gpu, 2, Int> =
+        let dev = gpu_device();
+        let model = det_loaded(&cfg, &dev).into_model(&dev);
+        let input: Tensor<2, Int> =
             Tensor::from_data(TensorData::new(flat, [batch, seq]), &dev);
         let _warm = model
             .forward_sentence(input.clone(), Pooling::Mean, true)

@@ -7,7 +7,7 @@
 
 use std::ops::ControlFlow;
 
-use burn::tensor::{ElementConversion, Int, Tensor, backend::Backend};
+use burn::tensor::{Device, ElementConversion, Int, Tensor};
 
 use super::model::DecoderModel;
 use super::sample::Sampler;
@@ -21,7 +21,7 @@ pub enum TokenPicker {
 }
 
 impl TokenPicker {
-    fn pick<B: Backend>(&mut self, logits: &Tensor<B, 3>) -> u32 {
+    fn pick(&mut self, logits: &Tensor<3>) -> u32 {
         match self {
             TokenPicker::Greedy => argmax_last(logits),
             TokenPicker::Sampled(sampler) => {
@@ -42,20 +42,20 @@ impl TokenPicker {
 /// `into_scalar().elem()` converts from the backend's int element type
 /// (i64 on ndarray, i32 on the wgpu instantiation) instead of assuming
 /// one.
-fn argmax_last<B: Backend>(logits: &Tensor<B, 3>) -> u32 {
+fn argmax_last(logits: &Tensor<3>) -> u32 {
     let [batch, seq, vocab] = logits.dims();
     debug_assert_eq!(batch, 1, "generation is single-sequence");
     let last = logits
         .clone()
         .slice([0..1, (seq - 1)..seq, 0..vocab])
         .argmax(2);
-    let id: i64 = last.into_scalar().elem();
+    let id: i64 = last.into_scalar::<i64>();
     id as u32
 }
 
 /// Greedy [`generate_ids_with`].
-pub fn generate_ids<B: Backend>(
-    model: &DecoderModel<B>,
+pub fn generate_ids(
+    model: &DecoderModel,
     prompt_ids: &[u32],
     max_new: usize,
     eos: &[u32],
@@ -76,8 +76,8 @@ pub fn generate_ids<B: Backend>(
 /// `on_token` (return `Break` to stop after it); generation also stops
 /// on any id in `eos`. Returns the generated ids (prompt excluded, eos
 /// excluded).
-pub fn generate_ids_with<B: Backend>(
-    model: &DecoderModel<B>,
+pub fn generate_ids_with(
+    model: &DecoderModel,
     prompt_ids: &[u32],
     max_new: usize,
     eos: &[u32],
@@ -89,7 +89,7 @@ pub fn generate_ids_with<B: Backend>(
     let mut cache = model.new_cache();
 
     let prompt: Vec<i32> = prompt_ids.iter().map(|&t| t as i32).collect();
-    let input: Tensor<B, 2, Int> = Tensor::from_data(
+    let input: Tensor<2, Int> = Tensor::from_data(
         burn::tensor::TensorData::new(prompt, [1, prompt_ids.len()]),
         &device,
     );
@@ -105,7 +105,7 @@ pub fn generate_ids_with<B: Backend>(
         if on_token(token).is_break() {
             break;
         }
-        let step: Tensor<B, 2, Int> = Tensor::from_data(
+        let step: Tensor<2, Int> = Tensor::from_data(
             burn::tensor::TensorData::new(vec![token as i32], [1, 1]),
             &device,
         );
@@ -117,8 +117,8 @@ pub fn generate_ids_with<B: Backend>(
 /// Reference implementation for the tests: no cache, full recompute of
 /// the whole sequence every step. Slow and simple on purpose.
 #[cfg(test)]
-pub(crate) fn generate_ids_uncached<B: Backend>(
-    model: &DecoderModel<B>,
+pub(crate) fn generate_ids_uncached(
+    model: &DecoderModel,
     prompt_ids: &[u32],
     max_new: usize,
     eos: &[u32],
@@ -128,7 +128,7 @@ pub(crate) fn generate_ids_uncached<B: Backend>(
     let mut out = Vec::new();
     for _ in 0..max_new {
         let all: Vec<i32> = ids.iter().map(|&t| t as i32).collect();
-        let input: Tensor<B, 2, Int> =
+        let input: Tensor<2, Int> =
             Tensor::from_data(burn::tensor::TensorData::new(all, [1, ids.len()]), &device);
         let logits = model.logits(input, 0);
         let token = argmax_last(&logits);
@@ -147,13 +147,12 @@ mod tests {
     use super::super::model::tests::det_loaded;
     use super::super::test_support::tiny_config;
     use super::*;
-    use burn::backend::NdArray;
+    
+    // backend chosen per call site via Device
 
-    type B = NdArray<f32>;
-
-    fn model() -> DecoderModel<B> {
+    fn model() -> DecoderModel {
         let config = tiny_config();
-        let dev = Default::default();
+        let dev = Device::ndarray();
         DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev)
     }
 

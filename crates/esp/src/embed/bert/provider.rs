@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use burn::tensor::{Int, Tensor, TensorData, backend::Backend};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 
 use crate::embed::bert::config::BertConfig;
 use crate::embed::bert::loader::{load_artifacts, load_into_model, load_into_model_from_bytes};
@@ -25,21 +25,21 @@ use crate::embed::provider::{EmbedError, EmbeddingProvider, SimilarityMetric};
 ///
 /// Generic over `B: Backend` so callers pick CPU (ndarray) or GPU (wgpu).
 #[derive(Debug)]
-pub struct BertEmbeddingProvider<B: Backend> {
+pub struct BertEmbeddingProvider {
     config: BertConfig,
-    model: Option<BertModel<B>>,
+    model: Option<BertModel>,
     tokenizer: Option<BertTokenizer>,
-    device: B::Device,
+    device: Device,
     pooling: Pooling,
     l2_normalize: bool,
 }
 
-impl<B: Backend> BertEmbeddingProvider<B> {
+impl BertEmbeddingProvider {
     /// Construct an unloaded provider. `embed` returns
     /// [`EmbedError::ModelNotLoaded`] until [`Self::with_model`] and
     /// [`Self::with_tokenizer`] are populated (or the
     /// [`Self::new_with_components`] constructor is used).
-    pub fn new(config: BertConfig, device: B::Device) -> Self {
+    pub fn new(config: BertConfig, device: Device) -> Self {
         Self {
             config,
             model: None,
@@ -54,9 +54,9 @@ impl<B: Backend> BertEmbeddingProvider<B> {
     /// embeddings via the model's forward pass.
     pub fn new_with_components(
         config: BertConfig,
-        model: BertModel<B>,
+        model: BertModel,
         tokenizer: BertTokenizer,
-        device: B::Device,
+        device: Device,
     ) -> Self {
         Self {
             config,
@@ -102,11 +102,11 @@ impl<B: Backend> BertEmbeddingProvider<B> {
     ///   model.safetensors
     /// ```
     ///
-    /// `B::Device` is the backend device on which tensors live (e.g.
+    /// `Device` is the backend device on which tensors live (e.g.
     /// `NdArrayDevice::default()` for CPU, a wgpu device for GPU).
-    pub fn load(model_dir: impl AsRef<Path>, device: B::Device) -> Result<Self, EmbedError> {
+    pub fn load(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, EmbedError> {
         let artifacts = load_artifacts(model_dir)?;
-        let model = load_into_model::<B>(&artifacts, &device)?;
+        let model = load_into_model(&artifacts, &device)?;
         Ok(Self::new_with_components(
             artifacts.config,
             model,
@@ -127,7 +127,7 @@ impl<B: Backend> BertEmbeddingProvider<B> {
         config_bytes: &[u8],
         tokenizer_bytes: &[u8],
         weights_bytes: &[u8],
-        device: B::Device,
+        device: Device,
     ) -> Result<Self, EmbedError> {
         let config: BertConfig = serde_json::from_slice(config_bytes)
             .map_err(|e| EmbedError::InvalidConfig(format!("config parse failed: {e}")))?;
@@ -136,12 +136,12 @@ impl<B: Backend> BertEmbeddingProvider<B> {
             config.max_position_embeddings,
             config.pad_token_id as u32,
         )?;
-        let model = load_into_model_from_bytes::<B>(&config, weights_bytes, &device)?;
+        let model = load_into_model_from_bytes(&config, weights_bytes, &device)?;
         Ok(Self::new_with_components(config, model, tokenizer, device))
     }
 }
 
-impl<B: Backend> EmbeddingProvider for BertEmbeddingProvider<B> {
+impl EmbeddingProvider for BertEmbeddingProvider {
     fn dimensions(&self) -> usize {
         self.config.hidden_size
     }
@@ -159,7 +159,7 @@ impl<B: Backend> EmbeddingProvider for BertEmbeddingProvider<B> {
         }
 
         let batch = tokenizer.encode_batch(texts)?;
-        let input_ids: Tensor<B, 2, Int> = Tensor::from_data(
+        let input_ids: Tensor<2, Int> = Tensor::from_data(
             TensorData::new(batch.input_ids, [batch.batch_size, batch.seq_len]),
             &self.device,
         );
@@ -184,9 +184,8 @@ impl<B: Backend> EmbeddingProvider for BertEmbeddingProvider<B> {
 mod tests {
     use super::*;
     use crate::embed::bert::config::MINILM_L6_V2;
-    use burn::backend::NdArray;
-
-    type B = NdArray<f32>;
+    
+    // backend chosen per call site via Device
 
     fn config() -> BertConfig {
         let mut c = MINILM_L6_V2.clone();
@@ -196,19 +195,19 @@ mod tests {
 
     #[test]
     fn dimensions_match_config_hidden_size() {
-        let p = BertEmbeddingProvider::<B>::new(config(), Default::default());
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray());
         assert_eq!(p.dimensions(), 384);
     }
 
     #[test]
     fn metric_is_cosine() {
-        let p = BertEmbeddingProvider::<B>::new(config(), Default::default());
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray());
         assert_eq!(p.metric(), SimilarityMetric::Cosine);
     }
 
     #[test]
     fn unloaded_provider_returns_model_not_loaded() {
-        let p = BertEmbeddingProvider::<B>::new(config(), Default::default());
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray());
         let err = p.embed(&["test"]).unwrap_err();
         assert_eq!(err, EmbedError::ModelNotLoaded);
         assert!(!p.is_loaded());
@@ -217,19 +216,19 @@ mod tests {
     #[test]
     fn config_borrow_matches_constructor() {
         let cfg = config();
-        let p = BertEmbeddingProvider::<B>::new(cfg.clone(), Default::default());
+        let p = BertEmbeddingProvider::new(cfg.clone(), Device::ndarray());
         assert_eq!(p.config(), &cfg);
     }
 
     #[test]
     fn satisfies_embedding_provider_trait_object_safety_check() {
-        let p = BertEmbeddingProvider::<B>::new(config(), Default::default());
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray());
         let _: &dyn EmbeddingProvider = &p;
     }
 
     #[test]
     fn pooling_and_normalize_overrides_compose() {
-        let p = BertEmbeddingProvider::<B>::new(config(), Default::default())
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray())
             .with_pooling(Pooling::Cls)
             .with_l2_normalize(false);
         assert_eq!(p.pooling, Pooling::Cls);
@@ -242,7 +241,7 @@ mod tests {
         // (so this works even when model/tokenizer are missing? — actually
         // the early-return is *after* the loaded check, so this is still
         // ModelNotLoaded for an unloaded provider).
-        let p = BertEmbeddingProvider::<B>::new(config(), Default::default());
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray());
         let err = p.embed(&[]).unwrap_err();
         assert_eq!(err, EmbedError::ModelNotLoaded);
     }
@@ -252,7 +251,7 @@ mod tests {
 ///
 /// The reason this exists: without it, every consumer that merely wants a
 /// loaded model has to name `burn::backend::NdArray<f32>` to satisfy
-/// `BertEmbeddingProvider<B>` — and so has to depend on Burn directly, for no
+/// `BertEmbeddingProvider` — and so has to depend on Burn directly, for no
 /// reason except spelling a type. Two integration consumers and one doctest had
 /// picked up that dependency by 2026-08-10.
 ///
@@ -263,7 +262,7 @@ mod tests {
 /// hidden behind this.
 pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
     let provider =
-        BertEmbeddingProvider::<burn::backend::NdArray<f32>>::load(model_dir, Default::default())?;
+        BertEmbeddingProvider::load(model_dir, Device::ndarray())?;
     Ok(Box::new(provider))
 }
 
@@ -274,9 +273,9 @@ pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider
 /// register it rather than let Burn open a second one.
 #[cfg(feature = "bert-wgpu")]
 pub fn load_wgpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
-    let provider = BertEmbeddingProvider::<burn::backend::Wgpu<f32, i32>>::load(
+    let provider = BertEmbeddingProvider::load(
         model_dir,
-        Default::default(),
+        Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0)),
     )?;
     Ok(Box::new(provider))
 }
@@ -294,11 +293,11 @@ pub fn from_bytes_cpu(
     tokenizer_bytes: &[u8],
     weights_bytes: &[u8],
 ) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
-    let provider = BertEmbeddingProvider::<burn::backend::NdArray<f32>>::from_bytes(
+    let provider = BertEmbeddingProvider::from_bytes(
         config_bytes,
         tokenizer_bytes,
         weights_bytes,
-        Default::default(),
+        Device::ndarray(),
     )?;
     Ok(Box::new(provider))
 }

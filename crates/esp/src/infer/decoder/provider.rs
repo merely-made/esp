@@ -15,7 +15,6 @@
 
 use std::ops::ControlFlow;
 
-use burn::tensor::backend::Backend;
 use tokenizers::Tokenizer;
 
 use super::config::DecoderConfig;
@@ -24,18 +23,19 @@ use super::loader::load_decoder_from_bytes;
 use super::model::DecoderModel;
 use super::sample::{Sampler, SplitMix64};
 use crate::infer::provider::{GenerationRequest, InferError, InferenceProvider, ModelCapability};
+use burn::tensor::Device;
 
 /// A llama-family decoder wired to the `InferenceProvider` seam.
-pub struct DecoderProvider<B: Backend> {
-    model: DecoderModel<B>,
+pub struct DecoderProvider {
+    model: DecoderModel,
     tokenizer: Tokenizer,
     capability: ModelCapability,
 }
 
-impl<B: Backend> DecoderProvider<B> {
+impl DecoderProvider {
     /// Assemble from already-built parts (tests; pre-loaded models).
     pub fn from_parts(
-        model: DecoderModel<B>,
+        model: DecoderModel,
         tokenizer: Tokenizer,
         model_id: impl Into<String>,
         loader: impl Into<String>,
@@ -63,12 +63,12 @@ impl<B: Backend> DecoderProvider<B> {
         weights_bytes: &[u8],
         model_id: impl Into<String>,
         loader: impl Into<String>,
-        device: &B::Device,
+        device: &Device,
     ) -> Result<Self, InferError> {
         let config = DecoderConfig::from_json_bytes(config_bytes)?;
         let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
             .map_err(|e| InferError::InvalidConfig(format!("tokenizer.json parse: {e}")))?;
-        let model = load_decoder_from_bytes::<B>(&config, weights_bytes, device)?;
+        let model = load_decoder_from_bytes(&config, weights_bytes, device)?;
         Ok(Self::from_parts(model, tokenizer, model_id, loader))
     }
 
@@ -79,7 +79,7 @@ impl<B: Backend> DecoderProvider<B> {
     }
 }
 
-impl<B: Backend> InferenceProvider for DecoderProvider<B> {
+impl InferenceProvider for DecoderProvider {
     fn capability(&self) -> &ModelCapability {
         &self.capability
     }
@@ -176,9 +176,9 @@ mod tests {
     use super::super::model::tests::det_loaded;
     use super::super::test_support::tiny_config;
     use super::*;
-    use burn::backend::NdArray;
-
-    type B = NdArray<f32>;
+    use burn::tensor::Device;
+    
+    // backend chosen per call site via Device
 
     /// A WordLevel tokenizer over the tiny vocab (`t0`..`t31`), built as
     /// real tokenizer.json bytes so the provider exercises the same
@@ -200,9 +200,9 @@ mod tests {
         Tokenizer::from_bytes(json.as_bytes()).expect("valid test tokenizer")
     }
 
-    fn provider() -> DecoderProvider<B> {
+    fn provider() -> DecoderProvider {
         let config = tiny_config();
-        let dev = Default::default();
+        let dev = Device::ndarray();
         let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
         DecoderProvider::from_parts(model, word_level_tokenizer(), "test/tiny", "burn-ndarray")
     }

@@ -7,7 +7,7 @@
 
 use burn::module::Param;
 use burn::nn::{Embedding, EmbeddingConfig, Linear, RmsNorm, RotaryEncoding, RotaryEncodingConfig};
-use burn::tensor::{Int, Tensor, backend::Backend};
+use burn::tensor::{Device, Int, Tensor};
 
 use super::attention::linear_no_bias_from_loaded;
 use super::config::DecoderConfig;
@@ -15,10 +15,10 @@ use super::layer::{DecoderLayer, LoadedDecoderLayer, rms_norm_from_loaded};
 
 /// Build an `Embedding` whose lookup table is the supplied
 /// `[vocab, hidden]` tensor.
-pub(crate) fn embedding_from_loaded<B: Backend>(
-    weight: Tensor<B, 2>,
-    device: &B::Device,
-) -> Embedding<B> {
+pub(crate) fn embedding_from_loaded(
+    weight: Tensor<2>,
+    device: &Device,
+) -> Embedding {
     let [vocab, hidden] = weight.dims();
     let mut embedding = EmbeddingConfig::new(vocab, hidden).init(device);
     embedding.weight = Param::from_tensor(weight);
@@ -27,31 +27,31 @@ pub(crate) fn embedding_from_loaded<B: Backend>(
 
 /// All pre-loaded tensors for a decoder, in Burn conventions
 /// (`[in, out]` linears; `[vocab, hidden]` embedding).
-pub struct LoadedDecoder<B: Backend> {
-    pub embed_w: Tensor<B, 2>,
-    pub layers: Vec<LoadedDecoderLayer<B>>,
-    pub final_norm_gamma: Tensor<B, 1>,
+pub struct LoadedDecoder {
+    pub embed_w: Tensor<2>,
+    pub layers: Vec<LoadedDecoderLayer>,
+    pub final_norm_gamma: Tensor<1>,
     /// `[hidden, vocab]`. `None` = tied: the LM head is the embedding
     /// matrix transposed.
-    pub lm_head_w: Option<Tensor<B, 2>>,
+    pub lm_head_w: Option<Tensor<2>>,
 }
 
 /// A llama-family decoder model.
 #[derive(Debug)]
-pub struct DecoderModel<B: Backend> {
-    embed: Embedding<B>,
-    layers: Vec<DecoderLayer<B>>,
-    final_norm: RmsNorm<B>,
-    lm_head: Linear<B>,
-    rope: RotaryEncoding<B>,
+pub struct DecoderModel {
+    embed: Embedding,
+    layers: Vec<DecoderLayer>,
+    final_norm: RmsNorm,
+    lm_head: Linear,
+    rope: RotaryEncoding,
     config: DecoderConfig,
 }
 
-impl<B: Backend> DecoderModel<B> {
+impl DecoderModel {
     pub fn from_loaded(
         config: DecoderConfig,
-        loaded: LoadedDecoder<B>,
-        device: &B::Device,
+        loaded: LoadedDecoder,
+        device: &Device,
     ) -> Self {
         let lm_head_w = loaded
             .lm_head_w
@@ -78,14 +78,14 @@ impl<B: Backend> DecoderModel<B> {
     }
 
     /// The device this model's weights live on.
-    pub fn device(&self) -> B::Device {
+    pub fn device(&self) -> Device {
         self.embed.weight.device()
     }
 
     /// Hidden states after the final norm.
     /// `input_ids: [batch, seq]`; `start` = absolute position of the
     /// first token (0 for full-sequence prefill).
-    pub fn forward_hidden(&self, input_ids: Tensor<B, 2, Int>, start: usize) -> Tensor<B, 3> {
+    pub fn forward_hidden(&self, input_ids: Tensor<2, Int>, start: usize) -> Tensor<3> {
         let mut h = self.embed.forward(input_ids);
         for layer in &self.layers {
             h = layer.forward(h, &self.rope, start);
@@ -94,12 +94,12 @@ impl<B: Backend> DecoderModel<B> {
     }
 
     /// Next-token logits for every position: `[batch, seq, vocab]`.
-    pub fn logits(&self, input_ids: Tensor<B, 2, Int>, start: usize) -> Tensor<B, 3> {
+    pub fn logits(&self, input_ids: Tensor<2, Int>, start: usize) -> Tensor<3> {
         self.lm_head.forward(self.forward_hidden(input_ids, start))
     }
 
     /// A fresh, empty KV cache sized to this model's layer count.
-    pub fn new_cache(&self) -> KvCache<B> {
+    pub fn new_cache(&self) -> KvCache {
         KvCache {
             layers: (0..self.layers.len())
                 .map(|_| super::attention::LayerKvCache::default())
@@ -114,9 +114,9 @@ impl<B: Backend> DecoderModel<B> {
     /// with the whole prompt; decode = subsequent single-token calls.
     pub fn forward_cached(
         &self,
-        input_ids: Tensor<B, 2, Int>,
-        cache: &mut KvCache<B>,
-    ) -> Tensor<B, 3> {
+        input_ids: Tensor<2, Int>,
+        cache: &mut KvCache,
+    ) -> Tensor<3> {
         let seq = input_ids.dims()[1];
         let start = cache.position;
         let mut h = self.embed.forward(input_ids);
@@ -130,12 +130,12 @@ impl<B: Backend> DecoderModel<B> {
 
 /// Model-level KV cache: one [`super::attention::LayerKvCache`] per layer
 /// plus the absolute position of the next token.
-pub struct KvCache<B: Backend> {
-    layers: Vec<super::attention::LayerKvCache<B>>,
+pub struct KvCache {
+    layers: Vec<super::attention::LayerKvCache>,
     position: usize,
 }
 
-impl<B: Backend> KvCache<B> {
+impl KvCache {
     /// Absolute position of the next token (== tokens consumed so far).
     pub fn position(&self) -> usize {
         self.position
@@ -146,23 +146,22 @@ impl<B: Backend> KvCache<B> {
 pub(crate) mod tests {
     use super::super::test_support::{t1_ones, t2, tiny_config};
     use super::*;
-    use burn::backend::NdArray;
+    
+    // backend chosen per call site via Device
+    type Dev = Device;
 
-    type B = NdArray<f32>;
-    type Dev = <B as burn::tensor::backend::BackendTypes>::Device;
-
-    pub(crate) fn det_loaded(config: &DecoderConfig, dev: &Dev) -> LoadedDecoder<B> {
+    pub(crate) fn det_loaded(config: &DecoderConfig, dev: &Dev) -> LoadedDecoder {
         let h = config.hidden_size;
         let kv = config.kv_heads() * config.head_dim();
         let inter = config.intermediate_size;
         let layers = (0..config.num_hidden_layers)
             .map(|i| LoadedDecoderLayer {
-                input_norm_gamma: t1_ones::<B>(h, dev),
+                input_norm_gamma: t1_ones(h, dev),
                 q_w: t2(h, h, 100 * (i + 1) + 1, dev),
                 k_w: t2(h, kv, 100 * (i + 1) + 2, dev),
                 v_w: t2(h, kv, 100 * (i + 1) + 3, dev),
                 o_w: t2(h, h, 100 * (i + 1) + 4, dev),
-                post_norm_gamma: t1_ones::<B>(h, dev),
+                post_norm_gamma: t1_ones(h, dev),
                 gate_w: t2(h, inter, 100 * (i + 1) + 5, dev),
                 up_w: t2(h, inter, 100 * (i + 1) + 6, dev),
                 down_w: t2(inter, h, 100 * (i + 1) + 7, dev),
@@ -171,19 +170,19 @@ pub(crate) mod tests {
         LoadedDecoder {
             embed_w: t2(config.vocab_size, h, 7, dev),
             layers,
-            final_norm_gamma: t1_ones::<B>(h, dev),
+            final_norm_gamma: t1_ones(h, dev),
             lm_head_w: Some(t2(h, config.vocab_size, 8, dev)),
         }
     }
 
-    fn ids(dev: &Dev) -> Tensor<B, 2, Int> {
+    fn ids(dev: &Dev) -> Tensor<2, Int> {
         Tensor::from_data([[1, 5, 9, 2, 7]], dev)
     }
 
     #[test]
     fn logits_shape_finite_deterministic() {
         let config = tiny_config();
-        let dev: Dev = Default::default();
+        let dev = Device::ndarray();
         let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
 
         let a = model
@@ -206,7 +205,7 @@ pub(crate) mod tests {
     fn tied_lm_head_equals_explicit_transposed_embedding() {
         let mut config = tiny_config();
         config.tie_word_embeddings = true;
-        let dev: Dev = Default::default();
+        let dev = Device::ndarray();
 
         let mut tied = det_loaded(&config, &dev);
         tied.lm_head_w = None;

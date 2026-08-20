@@ -125,9 +125,9 @@ mod fixture_tests {
     use crate::embed::EmbeddingProvider;
     use crate::embed::bert::loader::{load_artifacts, load_into_model};
     use crate::embed::bert::provider::BertEmbeddingProvider;
-    use burn::backend::NdArray;
-
-    type B = NdArray<f32>;
+    use burn::tensor::Device;
+    
+    // backend chosen per call site via Device
 
     /// Smoke check that always runs: the unloaded provider rejects
     /// embed() cleanly. This catches accidental panic paths in the
@@ -136,9 +136,10 @@ mod fixture_tests {
     fn unloaded_provider_returns_model_not_loaded_error() {
         use crate::embed::bert::config::MINILM_L6_V2;
         use crate::embed::provider::EmbedError;
+        use burn::tensor::Device;
         let mut cfg = MINILM_L6_V2.clone();
         cfg.hidden_act = "gelu".to_string();
-        let p = BertEmbeddingProvider::<B>::new(cfg, Default::default());
+        let p = BertEmbeddingProvider::new(cfg, Device::ndarray());
         let err = p.embed(&["test"]).unwrap_err();
         assert_eq!(err, EmbedError::ModelNotLoaded);
     }
@@ -163,10 +164,10 @@ mod fixture_tests {
         let dir = minilm_dir().expect("SIBYLLA_MINILM_DIR must be set");
         let artifacts = load_artifacts(&dir).expect("artifact loading should succeed");
 
-        let device = Default::default();
-        let model = load_into_model::<B>(&artifacts, &device).expect("load model");
+        let device = Device::ndarray();
+        let model = load_into_model(&artifacts, &device).expect("load model");
 
-        let provider = BertEmbeddingProvider::<B>::new_with_components(
+        let provider = BertEmbeddingProvider::new_with_components(
             artifacts.config.clone(),
             model,
             artifacts.tokenizer,

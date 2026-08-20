@@ -14,24 +14,21 @@
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
-use burn::tensor::backend::{Backend, BackendTypes};
 use esp::infer::decoder::DecoderProvider;
 use esp::infer::{GenerationRequest, InferenceProvider};
 
-type Cpu = burn::backend::NdArray<f32>;
 
 fn model_dir() -> Option<PathBuf> {
     std::env::var("VATES_TINYLLAMA_DIR").ok().map(PathBuf::from)
 }
 
-fn load_provider<B: Backend>(loader: &str) -> DecoderProvider<B> {
+fn load_provider(device: burn::tensor::Device, loader: &str) -> DecoderProvider {
     let dir = model_dir().expect("VATES_TINYLLAMA_DIR must be set");
     let config = std::fs::read(dir.join("config.json")).expect("read config.json");
     let tokenizer = std::fs::read(dir.join("tokenizer.json")).expect("read tokenizer.json");
     let weights = std::fs::read(dir.join("model.safetensors")).expect("read model.safetensors");
-    let device = <B as BackendTypes>::Device::default();
     let t = std::time::Instant::now();
-    let provider = DecoderProvider::<B>::from_bytes(
+    let provider = DecoderProvider::from_bytes(
         &config,
         &tokenizer,
         &weights,
@@ -60,7 +57,7 @@ fn request(prompt: &str, max_tokens: usize) -> GenerationRequest {
 #[test]
 #[ignore = "requires VATES_TINYLLAMA_DIR (2.2GB checkpoint)"]
 fn greedy_continuation_answers_paris() {
-    let provider = load_provider::<Cpu>("burn-ndarray");
+    let provider = load_provider(burn::tensor::Device::ndarray(), "burn-ndarray");
     let out = provider
         .generate(&request("The capital of France is", 8))
         .expect("generate");
@@ -76,7 +73,7 @@ fn greedy_continuation_answers_paris() {
 #[test]
 #[ignore = "requires VATES_TINYLLAMA_DIR (2.2GB checkpoint)"]
 fn streaming_matches_collected_on_real_tokenizer() {
-    let provider = load_provider::<Cpu>("burn-ndarray");
+    let provider = load_provider(burn::tensor::Device::ndarray(), "burn-ndarray");
     let req = request("The capital of France is", 8);
     let mut fragments = Vec::new();
     let streamed = provider
@@ -94,18 +91,18 @@ fn streaming_matches_collected_on_real_tokenizer() {
 #[test]
 #[ignore = "requires VATES_TINYLLAMA_DIR (2.2GB checkpoint) and a GPU"]
 fn timing_tokens_per_second_cpu_vs_gpu() {
-    type Gpu = burn::backend::Wgpu<f32, i32>;
+    let gpu_device = burn::tensor::Device::wgpu(burn::tensor::DeviceKind::default());
     let prompt = "The old lighthouse keeper climbed the stairs and";
     let tokens = 16usize;
 
-    let cpu = load_provider::<Cpu>("burn-ndarray");
+    let cpu = load_provider(burn::tensor::Device::ndarray(), "burn-ndarray");
     let t = std::time::Instant::now();
     let out_cpu = cpu
         .generate(&request(prompt, tokens))
         .expect("cpu generate");
     let cpu_ms = t.elapsed().as_millis();
 
-    let gpu = load_provider::<Gpu>("burn-wgpu");
+    let gpu = load_provider(gpu_device.clone(), "burn-wgpu");
     // Warmup: one short generation so kernel compilation is not billed.
     let _ = gpu.generate(&request(prompt, 2)).expect("gpu warmup");
     let t = std::time::Instant::now();

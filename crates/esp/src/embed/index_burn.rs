@@ -22,7 +22,7 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use burn::tensor::{Tensor, TensorData, backend::Backend};
+use burn::tensor::{Device, Tensor, TensorData};
 
 use crate::embed::index::VectorIndex;
 
@@ -44,11 +44,11 @@ pub const SEARCH_GPU_MIN_ENTRIES: usize = 4096;
 /// runs on the CPU over the read-back `[Q,N]` scores. Zero-length rows (a
 /// token-free embedding) score 0 against everything, matching
 /// [`VectorIndex`](crate::embed::VectorIndex)'s cosine handling.
-pub fn cosine_top_k<B: Backend>(
+pub fn cosine_top_k(
     queries: &[Vec<f32>],
     corpus: &[Vec<f32>],
     k: usize,
-    device: &B::Device,
+    device: &Device,
 ) -> Vec<Vec<(usize, f32)>> {
     let q = queries.len();
     let n = corpus.len();
@@ -62,8 +62,8 @@ pub fn cosine_top_k<B: Backend>(
     let k = k.min(n);
 
     // [Q, N] cosine similarity as one matmul on unit-normalized rows.
-    let qn = l2_normalize_rows(rows_to_tensor::<B>(queries, dim, device));
-    let cn = l2_normalize_rows(rows_to_tensor::<B>(corpus, dim, device));
+    let qn = l2_normalize_rows(rows_to_tensor(queries, dim, device));
+    let cn = l2_normalize_rows(rows_to_tensor(corpus, dim, device));
     let sim = qn.matmul(cn.swap_dims(0, 1)); // [Q, d] · [d, N] = [Q, N]
     let scores = sim
         .into_data()
@@ -83,7 +83,7 @@ pub fn cosine_top_k<B: Backend>(
 }
 
 /// Stack `rows` (each length `dim`) into a `[rows.len(), dim]` tensor on `B`.
-fn rows_to_tensor<B: Backend>(rows: &[Vec<f32>], dim: usize, device: &B::Device) -> Tensor<B, 2> {
+fn rows_to_tensor(rows: &[Vec<f32>], dim: usize, device: &Device) -> Tensor<2> {
     let mut flat = Vec::with_capacity(rows.len() * dim);
     for row in rows {
         flat.extend_from_slice(row);
@@ -94,7 +94,7 @@ fn rows_to_tensor<B: Backend>(rows: &[Vec<f32>], dim: usize, device: &B::Device)
 /// Scale each row of a `[R, d]` tensor to unit L2 length. A zero row (norm ~0)
 /// stays ~zero (the `1e-12` guard divides it by epsilon, not by zero), so its
 /// cosine against anything is 0 — matching [`VectorIndex`](crate::embed::VectorIndex).
-fn l2_normalize_rows<B: Backend>(t: Tensor<B, 2>) -> Tensor<B, 2> {
+fn l2_normalize_rows(t: Tensor<2>) -> Tensor<2> {
     let sq_sum = (t.clone() * t.clone()).sum_dim(1); // [R, 1]
     let inv_norm = sq_sum.sqrt().add_scalar(1e-12).recip(); // [R, 1]
     t * inv_norm // [R, d] * [R, 1] broadcasts over the row
@@ -104,22 +104,21 @@ fn l2_normalize_rows<B: Backend>(t: Tensor<B, 2>) -> Tensor<B, 2> {
 /// the index's own `K` (not corpus positions). The GPU path for recall / search;
 /// a consumer routes to it when the index has at least [`SEARCH_GPU_MIN_ENTRIES`].
 /// Cosine only.
-pub fn nearest_over_index<K, B>(
+pub fn nearest_over_index<K>(
     index: &VectorIndex<K>,
     queries: &[Vec<f32>],
     k: usize,
-    device: &B::Device,
+    device: &Device,
 ) -> Vec<Vec<(K, f32)>>
 where
     K: Hash + Eq + Clone,
-    B: Backend,
 {
     let entries: Vec<(K, Vec<f32>)> = index
         .iter()
         .map(|(key, v)| (key.clone(), v.clone()))
         .collect();
     let corpus: Vec<Vec<f32>> = entries.iter().map(|(_, v)| v.clone()).collect();
-    cosine_top_k::<B>(queries, &corpus, k, device)
+    cosine_top_k(queries, &corpus, k, device)
         .into_iter()
         .map(|row| {
             row.into_iter()
@@ -136,15 +135,14 @@ where
 /// arrangement / affinity; a consumer routes to it when the index has at least
 /// [`AFFINITY_GPU_MIN_ENTRIES`]. Cosine only — the index metric is assumed
 /// [`Cosine`](crate::embed::SimilarityMetric::Cosine), as `affinity_pairs` intends.
-pub fn affinity_pairs_over_index<K, B>(
+pub fn affinity_pairs_over_index<K>(
     index: &VectorIndex<K>,
     top_k: usize,
     min_similarity: f32,
-    device: &B::Device,
+    device: &Device,
 ) -> Vec<(K, K, f32)>
 where
     K: Hash + Eq + Clone,
-    B: Backend,
 {
     let entries: Vec<(K, Vec<f32>)> = index
         .iter()
@@ -155,7 +153,7 @@ where
     }
     let vectors: Vec<Vec<f32>> = entries.iter().map(|(_, v)| v.clone()).collect();
     // `+1` because each entry's nearest set includes itself at the top.
-    let neighbours = cosine_top_k::<B>(&vectors, &vectors, top_k + 1, device);
+    let neighbours = cosine_top_k(&vectors, &vectors, top_k + 1, device);
 
     // Identical filter/dedup to `affinity_pairs`, over the GPU-computed neighbours.
     let mut seen: HashSet<(K, K)> = HashSet::new();
@@ -199,10 +197,10 @@ mod tests {
 
     #[test]
     fn matches_vector_index_nearest() {
-        type B = burn::backend::NdArray<f32>;
+        let device = burn::tensor::Device::ndarray();
         let (queries, corpus) = fixture();
         let k = 3;
-        let got = cosine_top_k::<B>(&queries, &corpus, k, &Default::default());
+        let got = cosine_top_k(&queries, &corpus, k, &device);
 
         // Reference: the CPU flat index this kernel is meant to accelerate.
         let mut idx = VectorIndex::<usize>::new(3, SimilarityMetric::Cosine);
@@ -221,9 +219,9 @@ mod tests {
     #[test]
     fn all_pairs_ranks_self_first() {
         // Queries == corpus: each item's nearest is itself at cosine ~1.
-        type B = burn::backend::NdArray<f32>;
+        let device = burn::tensor::Device::ndarray();
         let (_, corpus) = fixture();
-        let got = cosine_top_k::<B>(&corpus, &corpus, 1, &Default::default());
+        let got = cosine_top_k(&corpus, &corpus, 1, &device);
         for (i, row) in got.iter().enumerate() {
             assert_eq!(row[0].0, i, "item {i} should be its own nearest");
             assert!(
@@ -236,23 +234,23 @@ mod tests {
 
     #[test]
     fn edges_are_handled() {
-        type B = burn::backend::NdArray<f32>;
-        let dev = Default::default();
+        let device = burn::tensor::Device::ndarray();
+        let dev = burn::tensor::Device::ndarray();
         let corpus = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
         // No queries → no rows.
-        assert!(cosine_top_k::<B>(&[], &corpus, 2, &dev).is_empty());
+        assert!(cosine_top_k(&[], &corpus, 2, &dev).is_empty());
         // Empty corpus / k=0 → one empty result per query.
         assert_eq!(
-            cosine_top_k::<B>(&[vec![1.0, 0.0]], &[], 2, &dev),
+            cosine_top_k(&[vec![1.0, 0.0]], &[], 2, &dev),
             vec![Vec::<(usize, f32)>::new()]
         );
         assert_eq!(
-            cosine_top_k::<B>(&[vec![1.0, 0.0]], &corpus, 0, &dev),
+            cosine_top_k(&[vec![1.0, 0.0]], &corpus, 0, &dev),
             vec![Vec::<(usize, f32)>::new()]
         );
         // k clamps to the corpus size.
         assert_eq!(
-            cosine_top_k::<B>(&[vec![1.0, 0.0]], &corpus, 99, &dev)[0].len(),
+            cosine_top_k(&[vec![1.0, 0.0]], &corpus, 99, &dev)[0].len(),
             2
         );
     }
@@ -260,9 +258,9 @@ mod tests {
     #[test]
     fn zero_query_scores_zero_everywhere() {
         // A token-free (zero) query vector: cosine 0 to all, like the flat index.
-        type B = burn::backend::NdArray<f32>;
+        let device = burn::tensor::Device::ndarray();
         let corpus = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
-        let got = cosine_top_k::<B>(&[vec![0.0, 0.0, 0.0]], &corpus, 2, &Default::default());
+        let got = cosine_top_k(&[vec![0.0, 0.0, 0.0]], &corpus, 2, &device);
         for (_, s) in &got[0] {
             assert!(s.abs() < 1e-6, "zero query scores ~0, got {s}");
         }
@@ -270,14 +268,14 @@ mod tests {
 
     #[test]
     fn nearest_over_index_matches_cpu_nearest() {
-        type B = burn::backend::NdArray<f32>;
+        let device = burn::tensor::Device::ndarray();
         let mut index = VectorIndex::<u32>::new(3, SimilarityMetric::Cosine);
         index.insert(10, vec![1.0, 0.0, 0.0]).unwrap();
         index.insert(20, vec![0.9, 0.1, 0.0]).unwrap();
         index.insert(30, vec![0.0, 1.0, 0.0]).unwrap();
         let queries = vec![vec![1.0, 0.0, 0.0]];
 
-        let got = nearest_over_index::<u32, B>(&index, &queries, 2, &Default::default());
+        let got = nearest_over_index::<u32>(&index, &queries, 2, &device);
         let want = index.nearest(&queries[0], 2).unwrap(); // the CPU path it accelerates
         assert_eq!(got[0].len(), want.len());
         for ((gk, gs), (wk, ws)) in got[0].iter().zip(&want) {
@@ -290,7 +288,7 @@ mod tests {
     fn affinity_pairs_over_index_matches_cpu() {
         use crate::embed::affinity::affinity_pairs;
         use std::collections::HashMap;
-        type B = burn::backend::NdArray<f32>;
+        let device = burn::tensor::Device::ndarray();
         // Two clean clusters (A near axis 0, B near axis 1) — the affinity fixture.
         let mut index = VectorIndex::<u32>::new(4, SimilarityMetric::Cosine);
         for (key, v) in [
@@ -304,7 +302,7 @@ mod tests {
             index.insert(key, v).unwrap();
         }
         let cpu = affinity_pairs(&index, 3, 0.8).unwrap();
-        let gpu = affinity_pairs_over_index::<u32, B>(&index, 3, 0.8, &Default::default());
+        let gpu = affinity_pairs_over_index::<u32>(&index, 3, 0.8, &device);
 
         // Compare as canonical (min,max) → weight maps (pair order is not defined).
         let canon = |v: &[(u32, u32, f32)]| -> HashMap<(u32, u32), f32> {
@@ -334,11 +332,14 @@ mod tests {
     #[cfg(feature = "index-burn-wgpu")]
     #[test]
     fn parity_ndarray_wgpu() {
-        type Cpu = burn::backend::NdArray<f32>;
-        type Gpu = burn::backend::Wgpu<f32, i32>;
         let (queries, corpus) = fixture();
-        let cpu = cosine_top_k::<Cpu>(&queries, &corpus, 4, &Default::default());
-        let gpu = cosine_top_k::<Gpu>(&queries, &corpus, 4, &Default::default());
+        let cpu = cosine_top_k(&queries, &corpus, 4, &Device::ndarray());
+        let gpu = cosine_top_k(
+            &queries,
+            &corpus,
+            4,
+            &Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0)),
+        );
         assert_eq!(cpu.len(), gpu.len());
         for (rc, rg) in cpu.iter().zip(&gpu) {
             assert_eq!(rc.len(), rg.len());
@@ -361,8 +362,8 @@ mod tests {
     #[ignore = "timing sweep; run in release with --ignored --nocapture (see the doc comment)"]
     fn crossover_cpu_flat_vs_gpu_batched() {
         use std::time::Instant;
-        type Gpu = burn::backend::Wgpu<f32, i32>;
-        let device = Default::default();
+        let cpu_device = Device::ndarray();
+        let gpu_device = Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0));
         let d = 384; // a realistic embedding dimension (MiniLM-class)
         let k = 10;
 
@@ -382,7 +383,7 @@ mod tests {
 
         // Warm the GPU: the first dispatch pays device/pipeline init.
         let w = corpus(64, d, 1);
-        let _ = cosine_top_k::<Gpu>(&w, &w, k, &device);
+        let _ = cosine_top_k(&w, &w, k, &gpu_device);
 
         let run = |label: &str, corpus_v: &[Vec<f32>], queries: &[Vec<f32>]| {
             let n = corpus_v.len();
@@ -397,7 +398,7 @@ mod tests {
             let cpu = t.elapsed().as_secs_f64() * 1000.0;
 
             let t = Instant::now();
-            let _ = cosine_top_k::<Gpu>(queries, corpus_v, k, &device);
+            let _ = cosine_top_k(queries, corpus_v, k, &gpu_device);
             let gpu = t.elapsed().as_secs_f64() * 1000.0;
 
             println!(

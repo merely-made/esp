@@ -1,14 +1,14 @@
 //! Typed bundle of all tensors loaded from a HF BERT safetensors file.
 //!
 //! This is the structured intermediate between bytes-on-disk and a
-//! constructed `BertModel<B>`. After extraction, every weight/bias is on
+//! constructed `BertModel`. After extraction, every weight/bias is on
 //! the chosen Burn backend with the correct rank and shape; assembly into
 //! the model happens via [`crate::embed::bert::loader::load_into_model`].
 //!
 //! Organisation mirrors the BERT module hierarchy so each sub-bundle
 //! maps 1:1 to one constructed sub-module.
 
-use burn::tensor::{Tensor, backend::Backend};
+use burn::tensor::{Device, Tensor};
 use safetensors::SafeTensors;
 
 use super::config::BertConfig;
@@ -18,12 +18,12 @@ use super::safetensors_io::{extract_1d, extract_2d};
 /// Loaded tensors for the embedding stage:
 /// word + position + token-type lookup tables, plus LayerNorm gamma/beta.
 #[derive(Debug)]
-pub struct LoadedEmbeddings<B: Backend> {
-    pub word: Tensor<B, 2>,
-    pub position: Tensor<B, 2>,
-    pub token_type: Tensor<B, 2>,
-    pub ln_gamma: Tensor<B, 1>,
-    pub ln_beta: Tensor<B, 1>,
+pub struct LoadedEmbeddings {
+    pub word: Tensor<2>,
+    pub position: Tensor<2>,
+    pub token_type: Tensor<2>,
+    pub ln_gamma: Tensor<1>,
+    pub ln_beta: Tensor<1>,
 }
 
 /// Loaded tensors for one transformer layer.
@@ -42,67 +42,67 @@ pub struct LoadedEmbeddings<B: Backend> {
 /// weights are all `[hidden, hidden]` so the transpose is shape-invariant
 /// but is still applied to keep numerics correct.
 #[derive(Debug)]
-pub struct LoadedBertLayer<B: Backend> {
-    pub q_w: Tensor<B, 2>,
-    pub q_b: Tensor<B, 1>,
-    pub k_w: Tensor<B, 2>,
-    pub k_b: Tensor<B, 1>,
-    pub v_w: Tensor<B, 2>,
-    pub v_b: Tensor<B, 1>,
-    pub attn_out_w: Tensor<B, 2>,
-    pub attn_out_b: Tensor<B, 1>,
-    pub attn_ln_gamma: Tensor<B, 1>,
-    pub attn_ln_beta: Tensor<B, 1>,
-    pub inter_w: Tensor<B, 2>,
-    pub inter_b: Tensor<B, 1>,
-    pub out_w: Tensor<B, 2>,
-    pub out_b: Tensor<B, 1>,
-    pub out_ln_gamma: Tensor<B, 1>,
-    pub out_ln_beta: Tensor<B, 1>,
+pub struct LoadedBertLayer {
+    pub q_w: Tensor<2>,
+    pub q_b: Tensor<1>,
+    pub k_w: Tensor<2>,
+    pub k_b: Tensor<1>,
+    pub v_w: Tensor<2>,
+    pub v_b: Tensor<1>,
+    pub attn_out_w: Tensor<2>,
+    pub attn_out_b: Tensor<1>,
+    pub attn_ln_gamma: Tensor<1>,
+    pub attn_ln_beta: Tensor<1>,
+    pub inter_w: Tensor<2>,
+    pub inter_b: Tensor<1>,
+    pub out_w: Tensor<2>,
+    pub out_b: Tensor<1>,
+    pub out_ln_gamma: Tensor<1>,
+    pub out_ln_beta: Tensor<1>,
 }
 
 /// Complete loaded BERT model: embedding stage + one entry per transformer layer.
 #[derive(Debug)]
-pub struct LoadedBert<B: Backend> {
+pub struct LoadedBert {
     pub config: BertConfig,
-    pub embeddings: LoadedEmbeddings<B>,
-    pub layers: Vec<LoadedBertLayer<B>>,
+    pub embeddings: LoadedEmbeddings,
+    pub layers: Vec<LoadedBertLayer>,
 }
 
-impl<B: Backend> LoadedBert<B> {
+impl LoadedBert {
     pub fn num_layers(&self) -> usize {
         self.layers.len()
     }
 
-    /// Build a `BertModel<B>` from the loaded tensors. This is the
+    /// Build a `BertModel` from the loaded tensors. This is the
     /// canonical "tensors → model" entry point.
-    pub fn into_model(&self, device: &B::Device) -> super::model::BertModel<B> {
+    pub fn into_model(&self, device: &Device) -> super::model::BertModel {
         super::model::BertModel::from_loaded(self, device)
     }
 }
 
 /// Extract every expected tensor from a loaded safetensors file into a
-/// typed [`LoadedBert<B>`]. Validates dtype and shape per tensor; returns
+/// typed [`LoadedBert`]. Validates dtype and shape per tensor; returns
 /// the first error encountered.
 ///
 /// Path-based wrapper: reads `artifacts.weights_path` from disk, then
 /// delegates to [`extract_all_tensors_from_bytes`].
-pub fn extract_all_tensors<B: Backend>(
+pub fn extract_all_tensors(
     artifacts: &ModelArtifacts,
-    device: &B::Device,
-) -> Result<LoadedBert<B>, LoaderError> {
+    device: &Device,
+) -> Result<LoadedBert, LoaderError> {
     let bytes = std::fs::read(&artifacts.weights_path)?;
-    extract_all_tensors_from_bytes::<B>(&artifacts.config, &bytes, device)
+    extract_all_tensors_from_bytes(&artifacts.config, &bytes, device)
 }
 
 /// Extract every expected tensor directly from in-memory weights bytes.
 /// Used when the model artifact flowed through a host store rather than the
 /// filesystem.
-pub fn extract_all_tensors_from_bytes<B: Backend>(
+pub fn extract_all_tensors_from_bytes(
     config: &super::config::BertConfig,
     weights_bytes: &[u8],
-    device: &B::Device,
-) -> Result<LoadedBert<B>, LoaderError> {
+    device: &Device,
+) -> Result<LoadedBert, LoaderError> {
     let st = SafeTensors::deserialize(weights_bytes)
         .map_err(|e| LoaderError::InvalidWeights(format!("{e}")))?;
     let cfg = config;
@@ -226,9 +226,8 @@ pub fn extract_all_tensors_from_bytes<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
-
-    type B = NdArray<f32>;
+    
+    // backend chosen per call site via Device
 
     #[test]
     fn loaded_bert_layer_has_sixteen_tensor_fields() {
@@ -239,8 +238,8 @@ mod tests {
         // total 16).
         // This test compiles only if the struct really has 16 named tensors.
         // We construct a LoadedBertLayer with placeholder tensors to enforce.
-        let device = Default::default();
-        let _layer: LoadedBertLayer<B> = LoadedBertLayer {
+        let device = Device::ndarray();
+        let _layer: LoadedBertLayer = LoadedBertLayer {
             q_w: burn::tensor::Tensor::zeros([2, 2], &device),
             q_b: burn::tensor::Tensor::zeros([2], &device),
             k_w: burn::tensor::Tensor::zeros([2, 2], &device),
@@ -262,8 +261,8 @@ mod tests {
 
     #[test]
     fn loaded_embeddings_has_five_tensor_fields() {
-        let device = Default::default();
-        let _emb: LoadedEmbeddings<B> = LoadedEmbeddings {
+        let device = Device::ndarray();
+        let _emb: LoadedEmbeddings = LoadedEmbeddings {
             word: burn::tensor::Tensor::zeros([10, 4], &device),
             position: burn::tensor::Tensor::zeros([8, 4], &device),
             token_type: burn::tensor::Tensor::zeros([2, 4], &device),
@@ -289,21 +288,21 @@ mod tests {
         }
     }
 
-    fn synth_loaded(config: &BertConfig) -> LoadedBert<B> {
-        use burn::tensor::{Distribution, Tensor};
-        let device = Default::default();
+    fn synth_loaded(config: &BertConfig) -> LoadedBert {
+        use burn::tensor::{Device, Distribution, Tensor};
+        let device = Device::ndarray();
         let h = config.hidden_size;
         let inter = config.intermediate_size;
         let dist = Distribution::Normal(0.0, 0.02);
-        let r1 = |n: usize| Tensor::<B, 1>::random([n], dist, &device);
-        let r2 = |a: usize, b: usize| Tensor::<B, 2>::random([a, b], dist, &device);
+        let r1 = |n: usize| Tensor::<1>::random([n], dist, &device);
+        let r2 = |a: usize, b: usize| Tensor::<2>::random([a, b], dist, &device);
 
         let embeddings = LoadedEmbeddings {
             word: r2(config.vocab_size, h),
             position: r2(config.max_position_embeddings, h),
             token_type: r2(config.type_vocab_size, h),
-            ln_gamma: Tensor::<B, 1>::ones([h], &device),
-            ln_beta: Tensor::<B, 1>::zeros([h], &device),
+            ln_gamma: Tensor::<1>::ones([h], &device),
+            ln_beta: Tensor::<1>::zeros([h], &device),
         };
         // Synthesised tensors are in Burn convention `[in, out]`,
         // matching what `extract_all_tensors` produces after the
@@ -318,14 +317,14 @@ mod tests {
                 v_b: r1(h),
                 attn_out_w: r2(h, h),
                 attn_out_b: r1(h),
-                attn_ln_gamma: Tensor::<B, 1>::ones([h], &device),
-                attn_ln_beta: Tensor::<B, 1>::zeros([h], &device),
+                attn_ln_gamma: Tensor::<1>::ones([h], &device),
+                attn_ln_beta: Tensor::<1>::zeros([h], &device),
                 inter_w: r2(h, inter),
                 inter_b: r1(inter),
                 out_w: r2(inter, h),
                 out_b: r1(h),
-                out_ln_gamma: Tensor::<B, 1>::ones([h], &device),
-                out_ln_beta: Tensor::<B, 1>::zeros([h], &device),
+                out_ln_gamma: Tensor::<1>::ones([h], &device),
+                out_ln_beta: Tensor::<1>::zeros([h], &device),
             })
             .collect();
         LoadedBert {
@@ -338,11 +337,11 @@ mod tests {
     #[test]
     fn synthesized_loaded_into_model_runs_forward_no_nans() {
         use burn::tensor::{Int, Tensor};
-        let device = Default::default();
+        let device = Device::ndarray();
         let cfg = tiny_config();
         let loaded = synth_loaded(&cfg);
         let model = loaded.into_model(&device);
-        let input_ids: Tensor<B, 2, Int> = Tensor::from_data([[1, 2, 3, 4, 5]], &device);
+        let input_ids: Tensor<2, Int> = Tensor::from_data([[1, 2, 3, 4, 5]], &device);
         let out = model.forward_tokens(input_ids);
         assert_eq!(out.dims(), [1, 5, cfg.hidden_size]);
         let v = out.into_data().to_vec::<f32>().unwrap();
@@ -356,11 +355,11 @@ mod tests {
     #[test]
     fn synthesized_loaded_sentence_forward_returns_normalized_vec() {
         use burn::tensor::{Int, Tensor};
-        let device = Default::default();
+        let device = Device::ndarray();
         let cfg = tiny_config();
         let loaded = synth_loaded(&cfg);
         let model = loaded.into_model(&device);
-        let input_ids: Tensor<B, 2, Int> = Tensor::from_data([[1, 2, 3, 4, 5]], &device);
+        let input_ids: Tensor<2, Int> = Tensor::from_data([[1, 2, 3, 4, 5]], &device);
         let out = model.forward_sentence(input_ids, crate::embed::bert::model::Pooling::Mean, true);
         assert_eq!(out.dims(), [1, cfg.hidden_size]);
         let v = out.into_data().to_vec::<f32>().unwrap();
@@ -374,11 +373,11 @@ mod tests {
     #[test]
     fn synthesized_loaded_is_deterministic_per_input() {
         use burn::tensor::{Int, Tensor};
-        let device = Default::default();
+        let device = Device::ndarray();
         let cfg = tiny_config();
         let loaded = synth_loaded(&cfg);
         let model = loaded.into_model(&device);
-        let input_ids: Tensor<B, 2, Int> = Tensor::from_data([[1, 2, 3]], &device);
+        let input_ids: Tensor<2, Int> = Tensor::from_data([[1, 2, 3]], &device);
         let a = model
             .forward_sentence(
                 input_ids.clone(),

@@ -33,13 +33,16 @@ pub use generate::{TokenPicker, generate_ids, generate_ids_with};
 pub use layer::{DecoderLayer, LoadedDecoderLayer};
 pub use loader::load_decoder_from_bytes;
 pub use model::{DecoderModel, KvCache, LoadedDecoder};
+
+#[cfg(feature = "decoder-wgpu")]
+use burn::tensor::Device;
 pub use provider::DecoderProvider;
 pub use sample::Sampler;
 
 /// The decoder on the wgpu backend — the concrete inference lane hosts use
 /// so they never name `burn` themselves.
 #[cfg(feature = "decoder-wgpu")]
-pub type WgpuDecoderProvider = DecoderProvider<burn::backend::Wgpu<f32, i32>>;
+pub type WgpuDecoderProvider = DecoderProvider;
 
 /// Load a llama-family checkpoint (HF artifact triple as bytes) on the wgpu
 /// backend. The host-facing entry point for real local inference.
@@ -56,7 +59,7 @@ pub fn load_wgpu_provider(
         weights_bytes,
         model_id,
         "burn-wgpu",
-        &Default::default(),
+        &Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0)),
     )
 }
 
@@ -65,8 +68,7 @@ pub fn load_wgpu_provider(
 /// pattern).
 #[cfg(test)]
 pub(crate) mod test_support {
-    use burn::tensor::backend::{Backend, BackendTypes};
-    use burn::tensor::{Tensor, TensorData};
+        use burn::tensor::{Device, Tensor, TensorData};
 
     use super::config::DecoderConfig;
 
@@ -76,16 +78,16 @@ pub(crate) mod test_support {
             .collect()
     }
 
-    pub fn t2<B: Backend>(
+    pub fn t2(
         a: usize,
         b: usize,
         salt: usize,
-        dev: &<B as BackendTypes>::Device,
-    ) -> Tensor<B, 2> {
+        dev: &Device,
+    ) -> Tensor<2> {
         Tensor::from_data(TensorData::new(det_vec(a * b, salt), [a, b]), dev)
     }
 
-    pub fn t1_ones<B: Backend>(n: usize, dev: &<B as BackendTypes>::Device) -> Tensor<B, 1> {
+    pub fn t1_ones(n: usize, dev: &Device) -> Tensor<1> {
         Tensor::ones([n], dev)
     }
 

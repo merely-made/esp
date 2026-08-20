@@ -12,25 +12,25 @@
 use burn::module::Module;
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::tensor::activation::softmax;
-use burn::tensor::{Tensor, backend::Backend};
+use burn::tensor::{Device, Tensor};
 
 use super::config::BertConfig;
 
 /// Multi-head scaled-dot-product self-attention. Outputs raw context vectors;
 /// the residual + LayerNorm step lives in [`BertSelfOutput`].
 #[derive(Module, Debug)]
-pub struct BertSelfAttention<B: Backend> {
-    query: Linear<B>,
-    key: Linear<B>,
-    value: Linear<B>,
+pub struct BertSelfAttention {
+    query: Linear,
+    key: Linear,
+    value: Linear,
     #[module(skip)]
     num_heads: usize,
     #[module(skip)]
     head_dim: usize,
 }
 
-impl<B: Backend> BertSelfAttention<B> {
-    pub fn new(config: &BertConfig, device: &B::Device) -> Self {
+impl BertSelfAttention {
+    pub fn new(config: &BertConfig, device: &Device) -> Self {
         let head_dim = config.head_dim();
         Self {
             query: LinearConfig::new(config.hidden_size, config.hidden_size).init(device),
@@ -46,8 +46,8 @@ impl<B: Backend> BertSelfAttention<B> {
     /// `[in, out]`, transpose at the safetensors-extraction boundary.
     pub fn from_loaded(
         config: &BertConfig,
-        loaded: &super::loaded::LoadedBertLayer<B>,
-        device: &B::Device,
+        loaded: &super::loaded::LoadedBertLayer,
+        device: &Device,
     ) -> Self {
         Self {
             query: super::construct::linear_from_loaded(
@@ -74,7 +74,7 @@ impl<B: Backend> BertSelfAttention<B> {
     ///
     /// - `hidden`: `[batch, seq_len, hidden_size]`
     /// - returns: `[batch, seq_len, hidden_size]`
-    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden: Tensor<3>) -> Tensor<3> {
         let [batch, seq_len, hidden_size] = hidden.dims();
         let num_heads = self.num_heads;
         let head_dim = self.head_dim;
@@ -114,13 +114,13 @@ impl<B: Backend> BertSelfAttention<B> {
 /// Output projection + residual + LayerNorm. Mirrors HF's `BertSelfOutput`
 /// so safetensors keys (`output.dense`, `output.LayerNorm`) map directly.
 #[derive(Module, Debug)]
-pub struct BertSelfOutput<B: Backend> {
-    dense: Linear<B>,
-    layer_norm: LayerNorm<B>,
+pub struct BertSelfOutput {
+    dense: Linear,
+    layer_norm: LayerNorm,
 }
 
-impl<B: Backend> BertSelfOutput<B> {
-    pub fn new(config: &BertConfig, device: &B::Device) -> Self {
+impl BertSelfOutput {
+    pub fn new(config: &BertConfig, device: &Device) -> Self {
         Self {
             dense: LinearConfig::new(config.hidden_size, config.hidden_size).init(device),
             layer_norm: LayerNormConfig::new(config.hidden_size)
@@ -131,8 +131,8 @@ impl<B: Backend> BertSelfOutput<B> {
 
     pub fn from_loaded(
         config: &BertConfig,
-        loaded: &super::loaded::LoadedBertLayer<B>,
-        device: &B::Device,
+        loaded: &super::loaded::LoadedBertLayer,
+        device: &Device,
     ) -> Self {
         Self {
             dense: super::construct::linear_from_loaded(
@@ -150,7 +150,7 @@ impl<B: Backend> BertSelfOutput<B> {
     }
 
     /// `LayerNorm(dense(attn) + residual)`.
-    pub fn forward(&self, attn: Tensor<B, 3>, residual: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, attn: Tensor<3>, residual: Tensor<3>) -> Tensor<3> {
         let projected = self.dense.forward(attn);
         self.layer_norm.forward(projected + residual)
     }
@@ -158,13 +158,13 @@ impl<B: Backend> BertSelfOutput<B> {
 
 /// Combined attention block: self-attention → output projection.
 #[derive(Module, Debug)]
-pub struct BertAttention<B: Backend> {
-    self_attention: BertSelfAttention<B>,
-    output: BertSelfOutput<B>,
+pub struct BertAttention {
+    self_attention: BertSelfAttention,
+    output: BertSelfOutput,
 }
 
-impl<B: Backend> BertAttention<B> {
-    pub fn new(config: &BertConfig, device: &B::Device) -> Self {
+impl BertAttention {
+    pub fn new(config: &BertConfig, device: &Device) -> Self {
         Self {
             self_attention: BertSelfAttention::new(config, device),
             output: BertSelfOutput::new(config, device),
@@ -173,8 +173,8 @@ impl<B: Backend> BertAttention<B> {
 
     pub fn from_loaded(
         config: &BertConfig,
-        loaded: &super::loaded::LoadedBertLayer<B>,
-        device: &B::Device,
+        loaded: &super::loaded::LoadedBertLayer,
+        device: &Device,
     ) -> Self {
         Self {
             self_attention: BertSelfAttention::from_loaded(config, loaded, device),
@@ -182,7 +182,7 @@ impl<B: Backend> BertAttention<B> {
         }
     }
 
-    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden: Tensor<3>) -> Tensor<3> {
         let attn = self.self_attention.forward(hidden.clone());
         self.output.forward(attn, hidden)
     }
@@ -192,9 +192,8 @@ impl<B: Backend> BertAttention<B> {
 mod tests {
     use super::*;
     use crate::embed::bert::config::MINILM_L6_V2;
-    use burn::backend::NdArray;
-
-    type B = NdArray<f32>;
+    
+    // backend chosen per call site via Device
 
     fn config() -> BertConfig {
         let mut c = MINILM_L6_V2.clone();
@@ -202,8 +201,8 @@ mod tests {
         c
     }
 
-    fn rand_input(batch: usize, seq: usize, hidden: usize) -> Tensor<B, 3> {
-        let device = Default::default();
+    fn rand_input(batch: usize, seq: usize, hidden: usize) -> Tensor<3> {
+        let device = Device::ndarray();
         Tensor::random(
             [batch, seq, hidden],
             burn::tensor::Distribution::Normal(0.0, 1.0),
@@ -213,8 +212,8 @@ mod tests {
 
     #[test]
     fn self_attention_returns_input_shape() {
-        let device = Default::default();
-        let attn: BertSelfAttention<B> = BertSelfAttention::new(&config(), &device);
+        let device = Device::ndarray();
+        let attn: BertSelfAttention = BertSelfAttention::new(&config(), &device);
         let input = rand_input(2, 8, 384);
         let out = attn.forward(input);
         assert_eq!(out.dims(), [2, 8, 384]);
@@ -222,8 +221,8 @@ mod tests {
 
     #[test]
     fn self_output_returns_input_shape() {
-        let device = Default::default();
-        let so: BertSelfOutput<B> = BertSelfOutput::new(&config(), &device);
+        let device = Device::ndarray();
+        let so: BertSelfOutput = BertSelfOutput::new(&config(), &device);
         let attn = rand_input(2, 8, 384);
         let residual = rand_input(2, 8, 384);
         let out = so.forward(attn, residual);
@@ -232,8 +231,8 @@ mod tests {
 
     #[test]
     fn full_attention_block_returns_input_shape() {
-        let device = Default::default();
-        let block: BertAttention<B> = BertAttention::new(&config(), &device);
+        let device = Device::ndarray();
+        let block: BertAttention = BertAttention::new(&config(), &device);
         let input = rand_input(2, 8, 384);
         let out = block.forward(input);
         assert_eq!(out.dims(), [2, 8, 384]);
@@ -241,8 +240,8 @@ mod tests {
 
     #[test]
     fn attention_handles_single_token_sequence() {
-        let device = Default::default();
-        let block: BertAttention<B> = BertAttention::new(&config(), &device);
+        let device = Device::ndarray();
+        let block: BertAttention = BertAttention::new(&config(), &device);
         let input = rand_input(1, 1, 384);
         let out = block.forward(input);
         assert_eq!(out.dims(), [1, 1, 384]);
@@ -250,8 +249,8 @@ mod tests {
 
     #[test]
     fn attention_no_nans_on_random_input() {
-        let device = Default::default();
-        let block: BertAttention<B> = BertAttention::new(&config(), &device);
+        let device = Device::ndarray();
+        let block: BertAttention = BertAttention::new(&config(), &device);
         let input = rand_input(2, 16, 384);
         let out = block.forward(input);
         let data = out.into_data();

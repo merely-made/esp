@@ -15,7 +15,6 @@
 
 use std::ops::ControlFlow;
 
-use burn::backend::NdArray;
 use eidetic::{
     ModelLibrary, ModerationState, NoFetcher, PrivacyClass, ProvenanceOrigin, ProvenanceRecord,
     Timestamp, TrustEnvelope, TrustLevel,
@@ -24,7 +23,7 @@ use esp::infer::decoder::DecoderProvider;
 use esp::infer::{GenerationRequest, InferenceProvider};
 use safetensors::tensor::{Dtype, TensorView};
 
-type B = NdArray<f32>;
+// backend chosen per call site via Device
 
 /// Minimal in-memory store (embed's bert_full_pipeline helper shape).
 // The in-memory test store is muniment's (2026-07-12): the
@@ -116,7 +115,7 @@ fn decoder_loads_through_eidetic_and_matches_direct_load() {
     let weights = weights_bytes();
 
     // Reference: provider built straight from the bytes.
-    let direct = DecoderProvider::<B>::from_bytes(
+    let direct = DecoderProvider::from_bytes(
         CONFIG_JSON.as_bytes(),
         tokenizer.as_bytes(),
         &weights,
@@ -177,7 +176,7 @@ fn decoder_loads_through_eidetic_and_matches_direct_load() {
 
     // Build the provider from the resolved bytes; behavior must be
     // indistinguishable from the direct load.
-    let via_eidetic = DecoderProvider::<B>::from_bytes(
+    let via_eidetic = DecoderProvider::from_bytes(
         &resolved.components.config_bytes,
         &resolved.components.tokenizer_bytes,
         &resolved.components.weight_bytes,

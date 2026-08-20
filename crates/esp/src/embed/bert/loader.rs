@@ -56,6 +56,7 @@ use safetensors::SafeTensors;
 use super::config::BertConfig;
 use super::tokenizer::BertTokenizer;
 use crate::embed::provider::EmbedError;
+use burn::tensor::Device;
 
 /// Reasons artifact loading or weight injection could fail.
 #[derive(Debug)]
@@ -344,7 +345,7 @@ pub fn validate_weights_from_bytes(
     Ok(issues)
 }
 
-/// Load a complete `BertModel<B>` from disk.
+/// Load a complete `BertModel` from disk.
 ///
 /// Steps:
 ///
@@ -371,22 +372,22 @@ pub fn validate_weights_from_bytes(
 /// - **LayerNorm field naming**: HF `weight`/`bias`; Burn `gamma`/`beta`.
 ///   Already mapped at the [`super::construct::layer_norm_from_loaded`]
 ///   boundary.
-pub fn load_into_model<B: burn::tensor::backend::Backend>(
+pub fn load_into_model(
     artifacts: &ModelArtifacts,
-    device: &B::Device,
-) -> Result<super::model::BertModel<B>, LoaderError> {
+    device: &Device,
+) -> Result<super::model::BertModel, LoaderError> {
     let bytes = std::fs::read(&artifacts.weights_path)?;
-    load_into_model_from_bytes::<B>(&artifacts.config, &bytes, device)
+    load_into_model_from_bytes(&artifacts.config, &bytes, device)
 }
 
 /// Same as [`load_into_model`] but takes the safetensors weights as an
 /// in-memory byte buffer. The path host-resolved model blobs flow
 /// through.
-pub fn load_into_model_from_bytes<B: burn::tensor::backend::Backend>(
+pub fn load_into_model_from_bytes(
     config: &BertConfig,
     weights_bytes: &[u8],
-    device: &B::Device,
-) -> Result<super::model::BertModel<B>, LoaderError> {
+    device: &Device,
+) -> Result<super::model::BertModel, LoaderError> {
     let issues = validate_weights_from_bytes(config, weights_bytes)?;
     if !issues.is_empty() {
         return Err(LoaderError::InvalidWeights(format!(
@@ -395,7 +396,7 @@ pub fn load_into_model_from_bytes<B: burn::tensor::backend::Backend>(
             issues.iter().take(5).collect::<Vec<_>>()
         )));
     }
-    let loaded = super::loaded::extract_all_tensors_from_bytes::<B>(config, weights_bytes, device)?;
+    let loaded = super::loaded::extract_all_tensors_from_bytes(config, weights_bytes, device)?;
     Ok(loaded.into_model(device))
 }
 
