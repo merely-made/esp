@@ -226,7 +226,7 @@ pub fn extract_all_tensors_from_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // backend chosen per call site via Device
 
     #[test]

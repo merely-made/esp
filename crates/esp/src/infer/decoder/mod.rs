@@ -68,7 +68,7 @@ pub fn load_wgpu_provider(
 /// pattern).
 #[cfg(test)]
 pub(crate) mod test_support {
-        use burn::tensor::{Device, Tensor, TensorData};
+    use burn::tensor::{Device, Tensor, TensorData};
 
     use super::config::DecoderConfig;
 
@@ -78,12 +78,7 @@ pub(crate) mod test_support {
             .collect()
     }
 
-    pub fn t2(
-        a: usize,
-        b: usize,
-        salt: usize,
-        dev: &Device,
-    ) -> Tensor<2> {
+    pub fn t2(a: usize, b: usize, salt: usize, dev: &Device) -> Tensor<2> {
         Tensor::from_data(TensorData::new(det_vec(a * b, salt), [a, b]), dev)
     }
 

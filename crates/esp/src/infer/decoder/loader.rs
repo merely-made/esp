@@ -128,7 +128,7 @@ pub fn load_decoder_from_bytes(
 mod tests {
     use super::super::test_support::{det_vec, tiny_config};
     use super::*;
-        use burn::tensor::{Int, Tensor};
+    use burn::tensor::{Int, Tensor};
     use safetensors::tensor::Dtype;
 
     // backend chosen per call site via Device
@@ -244,11 +244,9 @@ mod tests {
         let config = tiny_config();
         let table = tiny_tensor_table(&config, true);
         let f32_model =
-            load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray())
-                .unwrap();
+            load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray()).unwrap();
         let bf16_model =
-            load_decoder_from_bytes(&config, &serialize_bf16(&table), &Device::ndarray())
-                .unwrap();
+            load_decoder_from_bytes(&config, &serialize_bf16(&table), &Device::ndarray()).unwrap();
         let a = f32_model
             .logits(ids(), 0)
             .into_data()
@@ -289,9 +287,8 @@ mod tests {
         let config = tiny_config();
         let mut table = tiny_tensor_table(&config, true);
         table.retain(|(n, _, _)| n != "model.layers.1.mlp.up_proj.weight");
-        let err =
-            load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray())
-                .unwrap_err();
+        let err = load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray())
+            .unwrap_err();
         match err {
             InferError::InvalidWeights(msg) => {
                 assert!(msg.contains("model.layers.1.mlp.up_proj.weight"), "{msg}")

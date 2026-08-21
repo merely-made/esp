@@ -82,7 +82,7 @@ pub fn extract_2d(
 #[cfg(test)]
 mod tests {
     use super::*;
-        use safetensors::tensor::TensorView;
+    use safetensors::tensor::TensorView;
 
     // backend chosen per call site via Device
 

@@ -177,7 +177,7 @@ mod tests {
     use super::super::test_support::tiny_config;
     use super::*;
     use burn::tensor::Device;
-    
+
     // backend chosen per call site via Device
 
     /// A WordLevel tokenizer over the tiny vocab (`t0`..`t31`), built as

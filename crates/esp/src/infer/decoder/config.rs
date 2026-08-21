@@ -86,20 +86,22 @@ impl DecoderConfig {
     }
 
     fn validate(&self) -> Result<(), InferError> {
-        if self.num_attention_heads == 0 || self.hidden_size % self.num_attention_heads != 0 {
+        if self.num_attention_heads == 0
+            || !self.hidden_size.is_multiple_of(self.num_attention_heads)
+        {
             return Err(InferError::InvalidConfig(format!(
                 "hidden_size {} not divisible by num_attention_heads {}",
                 self.hidden_size, self.num_attention_heads
             )));
         }
-        if self.num_attention_heads % self.kv_heads() != 0 {
+        if !self.num_attention_heads.is_multiple_of(self.kv_heads()) {
             return Err(InferError::InvalidConfig(format!(
                 "num_attention_heads {} not divisible by num_key_value_heads {}",
                 self.num_attention_heads,
                 self.kv_heads()
             )));
         }
-        if self.head_dim() % 2 != 0 {
+        if !self.head_dim().is_multiple_of(2) {
             return Err(InferError::InvalidConfig(format!(
                 "head_dim {} must be even for rotary encoding",
                 self.head_dim()

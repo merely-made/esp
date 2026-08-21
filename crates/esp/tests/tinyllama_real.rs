@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use esp::infer::decoder::DecoderProvider;
 use esp::infer::{GenerationRequest, InferenceProvider};
 
-
 fn model_dir() -> Option<PathBuf> {
     std::env::var("VATES_TINYLLAMA_DIR").ok().map(PathBuf::from)
 }

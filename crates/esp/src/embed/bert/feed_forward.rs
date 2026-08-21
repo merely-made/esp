@@ -91,7 +91,7 @@ impl BertOutput {
 mod tests {
     use super::*;
     use crate::embed::bert::config::MINILM_L6_V2;
-    
+
     // backend chosen per call site via Device
 
     fn config() -> BertConfig {

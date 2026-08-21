@@ -84,7 +84,7 @@ impl<K: Hash + Eq + Clone, P: EmbeddingProvider> SemanticSearch<K, P> {
         }
         let texts: Vec<&str> = items.iter().map(|(_, t)| *t).collect();
         let vectors = self.provider.embed(&texts)?;
-        for ((key, _), vec) in items.iter().zip(vectors.into_iter()) {
+        for ((key, _), vec) in items.iter().zip(vectors) {
             self.index.insert(key.clone(), vec)?;
         }
         Ok(())

@@ -17,11 +17,7 @@ use burn::tensor::{Device, Tensor};
 /// `weight` shape is `[in_features, out_features]` (Burn convention; HF
 /// `Linear.weight` is stored as `[out, in]` so callers may need to
 /// transpose at the safetensors-extraction boundary).
-pub fn linear_from_loaded(
-    weight: Tensor<2>,
-    bias: Tensor<1>,
-    device: &Device,
-) -> Linear {
+pub fn linear_from_loaded(weight: Tensor<2>, bias: Tensor<1>, device: &Device) -> Linear {
     let [in_features, out_features] = weight.dims();
     let mut linear = LinearConfig::new(in_features, out_features).init(device);
     linear.weight = Param::from_tensor(weight);
@@ -61,7 +57,7 @@ pub fn layer_norm_from_loaded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // backend chosen per call site via Device
 
     #[test]

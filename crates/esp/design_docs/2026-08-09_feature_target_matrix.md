@@ -1,6 +1,6 @@
 # ESP feature and target matrix
 
-**Date:** 2026-08-09
+**Date:** 2026-08-09; Burn 0.22 prerelease matrix re-run 2026-08-20
 
 **Toolchain:** the workspace's current Rust toolchain
 
@@ -40,6 +40,14 @@ The wasm receipts are compile receipts. Headed browser loading, persistence,
 first-token latency, throughput, memory, cancellation, frame impact, and worker
 restart remain the separate D2 measurement lane named by the consolidation
 plan.
+
+The entire table was re-run after the Burn `0.22.0-pre.2` migration, one row at
+a time. The WGPU rows initially exposed an upstream `cubecl-runtime` wasm
+manifest defect; the narrow workspace patch recorded in the
+[Burn closure receipt](../../../../design_docs/mere_docs/testing/2026-08-20_burn_0_22_prerelease_closure.md)
+applies upstream's published corrections without changing CubeCL source. All
+eleven ESP rows then passed. This remains a compile receipt, not a headed
+browser execution claim.
 
 The workspace ignores its generated `Cargo.lock`. Ordinary and offline wasm
 checks pass. `--locked` is not used as a portability receipt because concurrent

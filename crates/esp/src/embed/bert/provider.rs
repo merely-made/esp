@@ -184,7 +184,7 @@ impl EmbeddingProvider for BertEmbeddingProvider {
 mod tests {
     use super::*;
     use crate::embed::bert::config::MINILM_L6_V2;
-    
+
     // backend chosen per call site via Device
 
     fn config() -> BertConfig {
@@ -261,8 +261,7 @@ mod tests {
 /// is a real requirement, not a workaround, which is why the generic API is not
 /// hidden behind this.
 pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
-    let provider =
-        BertEmbeddingProvider::load(model_dir, Device::ndarray())?;
+    let provider = BertEmbeddingProvider::load(model_dir, Device::ndarray())?;
     Ok(Box::new(provider))
 }
 

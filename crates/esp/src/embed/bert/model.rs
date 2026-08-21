@@ -99,7 +99,7 @@ fn l2_normalize_rows(rows: Tensor<2>) -> Tensor<2> {
 mod tests {
     use super::*;
     use crate::embed::bert::config::MINILM_L6_V2;
-    
+
     // backend chosen per call site via Device
 
     fn config() -> BertConfig {

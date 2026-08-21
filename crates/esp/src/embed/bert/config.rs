@@ -28,7 +28,7 @@ impl BertConfig {
     /// Panics if not evenly divisible (a misconfigured model).
     pub fn head_dim(&self) -> usize {
         assert!(
-            self.hidden_size % self.num_attention_heads == 0,
+            self.hidden_size.is_multiple_of(self.num_attention_heads),
             "BertConfig: hidden_size ({}) must be divisible by num_attention_heads ({})",
             self.hidden_size,
             self.num_attention_heads

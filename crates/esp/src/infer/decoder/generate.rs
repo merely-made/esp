@@ -7,7 +7,7 @@
 
 use std::ops::ControlFlow;
 
-use burn::tensor::{Device, ElementConversion, Int, Tensor};
+use burn::tensor::{Int, Tensor};
 
 use super::model::DecoderModel;
 use super::sample::Sampler;
@@ -143,11 +143,13 @@ pub(crate) fn generate_ids_uncached(
 
 #[cfg(test)]
 mod tests {
+    use burn::tensor::Device;
+
     use super::super::model::DecoderModel;
     use super::super::model::tests::det_loaded;
     use super::super::test_support::tiny_config;
     use super::*;
-    
+
     // backend chosen per call site via Device
 
     fn model() -> DecoderModel {

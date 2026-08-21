@@ -15,10 +15,7 @@ use super::layer::{DecoderLayer, LoadedDecoderLayer, rms_norm_from_loaded};
 
 /// Build an `Embedding` whose lookup table is the supplied
 /// `[vocab, hidden]` tensor.
-pub(crate) fn embedding_from_loaded(
-    weight: Tensor<2>,
-    device: &Device,
-) -> Embedding {
+pub(crate) fn embedding_from_loaded(weight: Tensor<2>, device: &Device) -> Embedding {
     let [vocab, hidden] = weight.dims();
     let mut embedding = EmbeddingConfig::new(vocab, hidden).init(device);
     embedding.weight = Param::from_tensor(weight);
@@ -48,11 +45,7 @@ pub struct DecoderModel {
 }
 
 impl DecoderModel {
-    pub fn from_loaded(
-        config: DecoderConfig,
-        loaded: LoadedDecoder,
-        device: &Device,
-    ) -> Self {
+    pub fn from_loaded(config: DecoderConfig, loaded: LoadedDecoder, device: &Device) -> Self {
         let lm_head_w = loaded
             .lm_head_w
             .unwrap_or_else(|| loaded.embed_w.clone().transpose());
@@ -112,11 +105,7 @@ impl DecoderModel {
     /// positions `cache.position..`, extends the cache, and returns
     /// logits `[batch, seq, vocab]` for the block. Prefill = first call
     /// with the whole prompt; decode = subsequent single-token calls.
-    pub fn forward_cached(
-        &self,
-        input_ids: Tensor<2, Int>,
-        cache: &mut KvCache,
-    ) -> Tensor<3> {
+    pub fn forward_cached(&self, input_ids: Tensor<2, Int>, cache: &mut KvCache) -> Tensor<3> {
         let seq = input_ids.dims()[1];
         let start = cache.position;
         let mut h = self.embed.forward(input_ids);
@@ -146,7 +135,7 @@ impl KvCache {
 pub(crate) mod tests {
     use super::super::test_support::{t1_ones, t2, tiny_config};
     use super::*;
-    
+
     // backend chosen per call site via Device
     type Dev = Device;
 

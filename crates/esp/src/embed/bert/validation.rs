@@ -47,7 +47,7 @@
 //! preprocessing path (mean-pool + L2-normalize). Commit them to the
 //! [`FIXTURES`] array below; the framework you used disappears.
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::excessive_precision)]
 
 /// One captured fixture — text in, first eight floats of the
 /// L2-normalized output.
@@ -126,7 +126,7 @@ mod fixture_tests {
     use crate::embed::bert::loader::{load_artifacts, load_into_model};
     use crate::embed::bert::provider::BertEmbeddingProvider;
     use burn::tensor::Device;
-    
+
     // backend chosen per call site via Device
 
     /// Smoke check that always runs: the unloaded provider rejects

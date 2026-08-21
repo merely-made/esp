@@ -18,7 +18,7 @@
 
 use burn::nn::{Linear, LinearConfig, RotaryEncoding};
 use burn::tensor::activation::softmax;
-use burn::tensor::{Device, Bool, Tensor};
+use burn::tensor::{Bool, Device, Tensor};
 
 use super::config::DecoderConfig;
 
@@ -52,10 +52,7 @@ impl LayerKvCache {
 }
 
 /// Build a bias-free `Linear` from a pre-loaded `[in, out]` weight.
-pub(crate) fn linear_no_bias_from_loaded(
-    weight: Tensor<2>,
-    device: &Device,
-) -> Linear {
+pub(crate) fn linear_no_bias_from_loaded(weight: Tensor<2>, device: &Device) -> Linear {
     let [d_in, d_out] = weight.dims();
     let mut linear = LinearConfig::new(d_in, d_out).with_bias(false).init(device);
     linear.weight = burn::module::Param::from_tensor(weight);
@@ -184,7 +181,7 @@ impl DecoderAttention {
 mod tests {
     use super::super::test_support::{t2, tiny_config};
     use super::*;
-        use burn::nn::RotaryEncodingConfig;
+    use burn::nn::RotaryEncodingConfig;
 
     // backend chosen per call site via Device
 
@@ -212,11 +209,8 @@ mod tests {
     fn forward_preserves_shape() {
         let config = tiny_config();
         let attn = attention(&config);
-        let x = t2(5, config.hidden_size, 99, &Device::ndarray()).reshape([
-            1,
-            5,
-            config.hidden_size,
-        ]);
+        let x =
+            t2(5, config.hidden_size, 99, &Device::ndarray()).reshape([1, 5, config.hidden_size]);
         let out = attn.forward(x, &rope(&config), 0);
         assert_eq!(out.dims(), [1, 5, config.hidden_size]);
     }
@@ -267,11 +261,7 @@ mod tests {
         );
     }
 
-    fn perturbed_out(
-        attn: &DecoderAttention,
-        x: Tensor<3>,
-        rope: &RotaryEncoding,
-    ) -> Vec<f32> {
+    fn perturbed_out(attn: &DecoderAttention, x: Tensor<3>, rope: &RotaryEncoding) -> Vec<f32> {
         attn.forward(x, rope, 0)
             .into_data()
             .to_vec::<f32>()

@@ -34,12 +34,7 @@ fn t1(n: usize, salt: usize, dev: &Device) -> Tensor<1> {
     Tensor::from_data(TensorData::new(det_vec(n, salt), [n]), dev)
 }
 
-fn t2(
-    a: usize,
-    b: usize,
-    salt: usize,
-    dev: &Device,
-) -> Tensor<2> {
+fn t2(a: usize, b: usize, salt: usize, dev: &Device) -> Tensor<2> {
     Tensor::from_data(TensorData::new(det_vec(a * b, salt), [a, b]), dev)
 }
 
@@ -171,8 +166,7 @@ fn timing_bert_cpu_vs_gpu() {
 
         let dev = gpu_device();
         let model = det_loaded(&cfg, &dev).into_model(&dev);
-        let input: Tensor<2, Int> =
-            Tensor::from_data(TensorData::new(flat, [batch, seq]), &dev);
+        let input: Tensor<2, Int> = Tensor::from_data(TensorData::new(flat, [batch, seq]), &dev);
         let _warm = model
             .forward_sentence(input.clone(), Pooling::Mean, true)
             .into_data()

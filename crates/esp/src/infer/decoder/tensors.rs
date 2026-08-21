@@ -93,7 +93,7 @@ pub fn extract_2d(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // backend chosen per call site via Device
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {

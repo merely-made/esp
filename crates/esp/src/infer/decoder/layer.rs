@@ -17,11 +17,7 @@ use super::attention::{DecoderAttention, linear_no_bias_from_loaded};
 use super::config::DecoderConfig;
 
 /// Build an `RmsNorm` whose gamma is the supplied tensor.
-pub(crate) fn rms_norm_from_loaded(
-    gamma: Tensor<1>,
-    epsilon: f64,
-    device: &Device,
-) -> RmsNorm {
+pub(crate) fn rms_norm_from_loaded(gamma: Tensor<1>, epsilon: f64, device: &Device) -> RmsNorm {
     let [size] = gamma.dims();
     let mut norm = RmsNormConfig::new(size).with_epsilon(epsilon).init(device);
     norm.gamma = Param::from_tensor(gamma);
@@ -31,11 +27,7 @@ pub(crate) fn rms_norm_from_loaded(
 /// Build a `SwiGlu` from pre-loaded gate/up weights (`[hidden, inter]`,
 /// bias-free). Gate drives the silu side (`linear_inner`), up the
 /// element-wise side (`linear_outer`) — the HF llama convention.
-pub(crate) fn swiglu_from_loaded(
-    gate_w: Tensor<2>,
-    up_w: Tensor<2>,
-    device: &Device,
-) -> SwiGlu {
+pub(crate) fn swiglu_from_loaded(gate_w: Tensor<2>, up_w: Tensor<2>, device: &Device) -> SwiGlu {
     let [d_in, d_out] = gate_w.dims();
     let mut swiglu = SwiGluConfig::new(d_in, d_out).with_bias(false).init(device);
     swiglu.linear_inner = linear_no_bias_from_loaded(gate_w, device);
@@ -116,15 +108,11 @@ impl DecoderLayer {
 mod tests {
     use super::super::test_support::{t1_ones, t2, tiny_config};
     use super::*;
-        use burn::nn::RotaryEncodingConfig;
+    use burn::nn::RotaryEncodingConfig;
 
     // backend chosen per call site via Device
 
-    pub(crate) fn det_layer(
-        config: &DecoderConfig,
-        salt: usize,
-        device: &Device,
-    ) -> DecoderLayer {
+    pub(crate) fn det_layer(config: &DecoderConfig, salt: usize, device: &Device) -> DecoderLayer {
         let h = config.hidden_size;
         let kv = config.kv_heads() * config.head_dim();
         let inter = config.intermediate_size;
@@ -176,7 +164,7 @@ mod tests {
 mod tests_wgpu {
     use super::super::test_support::{det_vec, tiny_config};
     use super::*;
-        use burn::nn::RotaryEncodingConfig;
+    use burn::nn::RotaryEncodingConfig;
     use burn::tensor::TensorData;
 
     fn layer_out(config: &DecoderConfig, dev: &Device) -> Vec<f32> {
@@ -205,8 +193,7 @@ mod tests_wgpu {
         let rope = RotaryEncodingConfig::new(config.max_position_embeddings, config.head_dim())
             .with_theta(config.rope_theta)
             .init(&dev);
-        let x: Tensor<3> =
-            Tensor::from_data(TensorData::new(det_vec(5 * h, 99), [1, 5, h]), &dev);
+        let x: Tensor<3> = Tensor::from_data(TensorData::new(det_vec(5 * h, 99), [1, 5, h]), &dev);
         layer
             .forward(x, &rope, 0)
             .into_data()
@@ -218,7 +205,10 @@ mod tests_wgpu {
     fn layer_parity_ndarray_wgpu() {
         let config = tiny_config();
         let cpu = layer_out(&config, &Device::ndarray());
-        let gpu = layer_out(&config, &Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0)));
+        let gpu = layer_out(
+            &config,
+            &Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0)),
+        );
         let max_diff = cpu
             .iter()
             .zip(&gpu)
