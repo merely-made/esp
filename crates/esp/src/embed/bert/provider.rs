@@ -139,6 +139,62 @@ impl BertEmbeddingProvider {
         let model = load_into_model_from_bytes(&config, weights_bytes, &device)?;
         Ok(Self::new_with_components(config, model, tokenizer, device))
     }
+
+    /// Embed a batch without synchronously blocking on backend readback.
+    ///
+    /// Browser WebGPU implementations must use this path: adapter/device work
+    /// and tensor readback are promise-backed there, so the synchronous
+    /// [`EmbeddingProvider::embed`] contract cannot drive them safely.
+    pub async fn embed_async(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let Some(output) = self.forward_sentence_batch(texts)? else {
+            return Ok(Vec::new());
+        };
+        let dims = output.dims();
+        let flat = output
+            .into_data_async()
+            .await
+            .map_err(|e| EmbedError::Backend(format!("tensor readback: {e:?}")))?
+            .to_vec::<f32>()
+            .map_err(|e| EmbedError::Backend(format!("tensor to Vec<f32>: {e:?}")))?;
+        Ok(rows_from_flat(flat, dims))
+    }
+
+    /// Embed one text through [`Self::embed_async`].
+    pub async fn embed_one_async(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        let mut out = self.embed_async(&[text]).await?;
+        out.pop().ok_or_else(|| {
+            EmbedError::Backend("provider returned no vectors for one input".to_string())
+        })
+    }
+
+    fn forward_sentence_batch(&self, texts: &[&str]) -> Result<Option<Tensor<2>>, EmbedError> {
+        let model = self.model.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
+        let tokenizer = self.tokenizer.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
+
+        if texts.is_empty() {
+            return Ok(None);
+        }
+
+        let batch = tokenizer.encode_batch(texts)?;
+        let input_ids: Tensor<2, Int> = Tensor::from_data(
+            TensorData::new(batch.input_ids, [batch.batch_size, batch.seq_len]),
+            &self.device,
+        );
+
+        Ok(Some(model.forward_sentence(
+            input_ids,
+            self.pooling,
+            self.l2_normalize,
+        )))
+    }
+}
+
+fn rows_from_flat(flat: Vec<f32>, dims: [usize; 2]) -> Vec<Vec<f32>> {
+    let mut out = Vec::with_capacity(dims[0]);
+    for row in flat.chunks_exact(dims[1]) {
+        out.push(row.to_vec());
+    }
+    out
 }
 
 impl EmbeddingProvider for BertEmbeddingProvider {
@@ -151,32 +207,17 @@ impl EmbeddingProvider for BertEmbeddingProvider {
     }
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
-        let model = self.model.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
-        let tokenizer = self.tokenizer.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
-
-        if texts.is_empty() {
+        let Some(output) = self.forward_sentence_batch(texts)? else {
             return Ok(Vec::new());
-        }
-
-        let batch = tokenizer.encode_batch(texts)?;
-        let input_ids: Tensor<2, Int> = Tensor::from_data(
-            TensorData::new(batch.input_ids, [batch.batch_size, batch.seq_len]),
-            &self.device,
-        );
-
-        let output = model.forward_sentence(input_ids, self.pooling, self.l2_normalize);
+        };
 
         // Convert [batch, hidden] tensor to Vec<Vec<f32>>.
         let dims = output.dims();
         let flat = output
             .into_data()
             .to_vec::<f32>()
-            .map_err(|e| EmbedError::Backend(format!("tensor → Vec<f32>: {e:?}")))?;
-        let mut out = Vec::with_capacity(dims[0]);
-        for row in flat.chunks_exact(dims[1]) {
-            out.push(row.to_vec());
-        }
-        Ok(out)
+            .map_err(|e| EmbedError::Backend(format!("tensor to Vec<f32>: {e:?}")))?;
+        Ok(rows_from_flat(flat, dims))
     }
 }
 
@@ -211,6 +252,13 @@ mod tests {
         let err = p.embed(&["test"]).unwrap_err();
         assert_eq!(err, EmbedError::ModelNotLoaded);
         assert!(!p.is_loaded());
+    }
+
+    #[test]
+    fn unloaded_async_provider_returns_model_not_loaded() {
+        let p = BertEmbeddingProvider::new(config(), Device::ndarray());
+        let err = pollster::block_on(p.embed_async(&["test"])).unwrap_err();
+        assert_eq!(err, EmbedError::ModelNotLoaded);
     }
 
     #[test]

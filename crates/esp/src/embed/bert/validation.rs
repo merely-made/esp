@@ -176,12 +176,22 @@ mod fixture_tests {
 
         for fixture in FIXTURES {
             let v = provider.embed_one(fixture.text).expect("embed");
+            let async_v = pollster::block_on(provider.embed_one_async(fixture.text))
+                .expect("async embed");
             assert_eq!(
                 v.len(),
                 384,
                 "fixture {:?}: dimension mismatch",
                 fixture.text
             );
+            assert_eq!(async_v.len(), v.len());
+            for (sync, asynchronous) in v.iter().zip(&async_v) {
+                assert!(
+                    (sync - asynchronous).abs() < TOLERANCE,
+                    "fixture {:?}: sync/async drift: {sync} vs {asynchronous}",
+                    fixture.text
+                );
+            }
 
             let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
             assert!(
