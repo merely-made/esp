@@ -9,7 +9,7 @@
 //! method composes into a fully-loaded `BertModel`.
 
 use burn::module::Param;
-use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use burn::nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
 use burn::tensor::{Device, Tensor};
 
 /// Build a `Linear` whose weight and bias are the supplied tensors.
@@ -17,21 +17,19 @@ use burn::tensor::{Device, Tensor};
 /// `weight` shape is `[in_features, out_features]` (Burn convention; HF
 /// `Linear.weight` is stored as `[out, in]` so callers may need to
 /// transpose at the safetensors-extraction boundary).
-pub fn linear_from_loaded(weight: Tensor<2>, bias: Tensor<1>, device: &Device) -> Linear {
-    let [in_features, out_features] = weight.dims();
-    let mut linear = LinearConfig::new(in_features, out_features).init(device);
-    linear.weight = Param::from_tensor(weight);
-    linear.bias = Some(Param::from_tensor(bias));
-    linear
+pub fn linear_from_loaded(weight: Tensor<2>, bias: Tensor<1>, _device: &Device) -> Linear {
+    Linear {
+        weight: Param::from_tensor(weight),
+        bias: Some(Param::from_tensor(bias)),
+    }
 }
 
 /// Build an `Embedding` whose weight is the supplied lookup table.
 /// Shape is `[n_embeddings, d_embedding]`.
-pub fn embedding_from_loaded(weight: Tensor<2>, device: &Device) -> Embedding {
-    let [n_emb, d_emb] = weight.dims();
-    let mut emb = EmbeddingConfig::new(n_emb, d_emb).init(device);
-    emb.weight = Param::from_tensor(weight);
-    emb
+pub fn embedding_from_loaded(weight: Tensor<2>, _device: &Device) -> Embedding {
+    Embedding {
+        weight: Param::from_tensor(weight),
+    }
 }
 
 /// Build a `LayerNorm` whose gamma and beta are the supplied tensors.

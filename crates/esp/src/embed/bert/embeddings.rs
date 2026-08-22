@@ -25,7 +25,27 @@ pub struct BertEmbeddings {
     layer_norm: LayerNorm,
 }
 
+#[cfg(feature = "bert-validation")]
+pub(crate) struct BertEmbeddingWeights {
+    pub word_weight: Tensor<2>,
+    pub position_weight: Tensor<2>,
+    pub token_type_weight: Tensor<2>,
+}
+
 impl BertEmbeddings {
+    fn position_ids(input_ids: &Tensor<2, Int>) -> Tensor<2, Int> {
+        let [batch_size, seq_len] = input_ids.dims();
+        let device = input_ids.device();
+        Tensor::arange(0..seq_len as i64, &device)
+            .reshape([1, seq_len])
+            .repeat_dim(0, batch_size)
+    }
+
+    fn token_type_ids(input_ids: &Tensor<2, Int>) -> Tensor<2, Int> {
+        let [batch_size, seq_len] = input_ids.dims();
+        Tensor::zeros([batch_size, seq_len], &input_ids.device())
+    }
+
     /// Initialize from a config with random weights. Real weights load via
     /// the future `loader.rs` slice.
     pub fn new(config: &BertConfig, device: &Device) -> Self {
@@ -76,16 +96,8 @@ impl BertEmbeddings {
     /// - `input_ids`: `[batch, seq_len]` integer tensor of token ids.
     /// - returns: `[batch, seq_len, hidden_size]` float tensor.
     pub fn forward(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
-        let [batch_size, seq_len] = input_ids.dims();
-        let device = input_ids.device();
-
-        // Position ids: [0, 1, ..., seq_len-1] broadcast across the batch.
-        let position_ids: Tensor<2, Int> = Tensor::arange(0..seq_len as i64, &device)
-            .reshape([1, seq_len])
-            .repeat_dim(0, batch_size);
-
-        // Single-segment input → all token type ids = 0.
-        let token_type_ids: Tensor<2, Int> = Tensor::zeros([batch_size, seq_len], &device);
+        let position_ids = Self::position_ids(&input_ids);
+        let token_type_ids = Self::token_type_ids(&input_ids);
 
         let word_emb = self.word_embeddings.forward(input_ids);
         let pos_emb = self.position_embeddings.forward(position_ids);
@@ -93,6 +105,57 @@ impl BertEmbeddings {
 
         let sum = word_emb + pos_emb + type_emb;
         self.layer_norm.forward(sum)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_word(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.word_embeddings.forward(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_position_ids(&self, input_ids: Tensor<2, Int>) -> Tensor<2, Int> {
+        Self::position_ids(&input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_token_type_ids(&self, input_ids: Tensor<2, Int>) -> Tensor<2, Int> {
+        Self::token_type_ids(&input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_position(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.position_embeddings
+            .forward(Self::position_ids(&input_ids))
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_token_type(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.token_type_embeddings
+            .forward(Self::token_type_ids(&input_ids))
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_word_position_sum(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        let position_ids = Self::position_ids(&input_ids);
+        self.word_embeddings.forward(input_ids) + self.position_embeddings.forward(position_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_sum(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        let position_ids = Self::position_ids(&input_ids);
+        let token_type_ids = Self::token_type_ids(&input_ids);
+        self.word_embeddings.forward(input_ids)
+            + self.position_embeddings.forward(position_ids)
+            + self.token_type_embeddings.forward(token_type_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn weights(&self) -> BertEmbeddingWeights {
+        BertEmbeddingWeights {
+            word_weight: self.word_embeddings.weight.val(),
+            position_weight: self.position_embeddings.weight.val(),
+            token_type_weight: self.token_type_embeddings.weight.val(),
+        }
     }
 }
 

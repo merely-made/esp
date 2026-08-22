@@ -14,6 +14,8 @@ use burn::tensor::{Device, Int, Tensor, TensorData};
 use super::config::{BertConfig, MINILM_L6_V2};
 use super::loaded::{LoadedBert, LoadedBertLayer, LoadedEmbeddings};
 use super::model::Pooling;
+use super::provider::BertEmbeddingProvider;
+use super::validation::{FIXTURES, TOLERANCE};
 
 fn cpu_device() -> Device {
     Device::ndarray()
@@ -138,6 +140,84 @@ fn bert_sentence_parity_ndarray_wgpu() {
         max_diff < 2.0e-3,
         "cpu/gpu embeddings diverged: max_diff={max_diff}"
     );
+}
+
+/// Real-weight discriminator for the browser probe. This uses the same
+/// MiniLM artifact, input, async readback path, and fixture as Distillery,
+/// but runs them on native Wgpu. Keep it ignored because the model artifact
+/// is intentionally external to the repository.
+#[test]
+#[ignore = "requires SIBYLLA_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
+fn real_minilm_fixture_wgpu() {
+    let model_dir = std::env::var("SIBYLLA_MINILM_DIR")
+        .expect("SIBYLLA_MINILM_DIR must point at all-MiniLM-L6-v2");
+    let fixture = FIXTURES
+        .first()
+        .expect("the MiniLM reference fixture must be populated");
+    let provider = BertEmbeddingProvider::load(model_dir, gpu_device()).expect("load MiniLM");
+
+    let output = pollster::block_on(provider.embed_one_async(fixture.text))
+        .expect("run MiniLM fixture on native Wgpu");
+    let first_8: Vec<f32> = output.iter().take(8).copied().collect();
+    let first_8_bits: Vec<u32> = first_8.iter().map(|value| value.to_bits()).collect();
+    let norm = output.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let max_abs_error = first_8
+        .iter()
+        .zip(fixture.first_8)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0f32, f32::max);
+
+    assert_eq!(output.len(), 384, "unexpected MiniLM dimensions");
+    assert!(
+        output.iter().all(|value| value.is_finite()),
+        "MiniLM output contains non-finite values: first_8={first_8:?}, bits={first_8_bits:?}"
+    );
+    assert!(
+        (norm - 1.0).abs() < TOLERANCE,
+        "MiniLM output norm {norm} is invalid: first_8={first_8:?}, bits={first_8_bits:?}"
+    );
+    assert!(
+        max_abs_error < TOLERANCE,
+        "MiniLM fixture diverged by {max_abs_error}: first_8={first_8:?}, bits={first_8_bits:?}"
+    );
+
+    #[cfg(feature = "bert-validation")]
+    {
+        let trace = pollster::block_on(provider.trace_one_async(fixture.text))
+            .expect("trace MiniLM stages on native Wgpu");
+        assert!(trace.input_round_trip_matches);
+        assert_eq!(
+            trace.input_host,
+            vec![101, 2023, 2003, 1037, 7099, 6251, 1012, 102]
+        );
+        assert!(trace.embedding_word_weight.all_finite);
+        assert!(trace.embedding_position_weight.all_finite);
+        assert!(trace.embedding_token_type_weight.all_finite);
+        assert_eq!(trace.position_ids_immediate, (0..8).collect::<Vec<_>>());
+        assert_eq!(trace.token_type_ids_immediate, vec![0; 8]);
+        assert!(trace.embedding_word_immediate.all_finite);
+        assert!(trace.embedding_position_immediate.all_finite);
+        assert!(trace.embedding_token_type_immediate.all_finite);
+        assert!(trace.embedding_word_position_sum_immediate.all_finite);
+        assert!(trace.embedding_sum_immediate.all_finite);
+        assert!(trace.embeddings_immediate.all_finite);
+        assert!(trace.encoded_immediate.all_finite);
+        assert!(trace.pooled_immediate.all_finite);
+        assert!(trace.normalized_immediate.all_finite);
+        assert_eq!(trace.embeddings_immediate.dims, vec![1, 8, 384]);
+        assert_eq!(trace.encoded_immediate.dims, vec![1, 8, 384]);
+        assert_eq!(trace.pooled_immediate.dims, vec![1, 384]);
+        assert_eq!(trace.normalized_immediate.dims, vec![1, 384]);
+        assert!((trace.normalized_immediate.l2_norm - 1.0).abs() < TOLERANCE);
+        for (actual, expected) in trace
+            .normalized_immediate
+            .first_8
+            .iter()
+            .zip(fixture.first_8)
+        {
+            assert!((actual - expected).abs() < TOLERANCE);
+        }
+    }
 }
 
 /// CPU-vs-GPU timing at real MiniLM-L6 dims (384 hidden, 6 layers) with a

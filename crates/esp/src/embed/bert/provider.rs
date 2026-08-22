@@ -34,6 +34,50 @@ pub struct BertEmbeddingProvider {
     l2_normalize: bool,
 }
 
+/// One forced tensor readback in the feature-gated BERT validation corridor.
+/// This is probe evidence, not a stable inference result contract.
+#[cfg(feature = "bert-validation")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BertFloatTrace {
+    pub dims: Vec<usize>,
+    pub first_8: Vec<f32>,
+    pub first_8_bits: Vec<u32>,
+    pub all_finite: bool,
+    pub nan_count: usize,
+    pub positive_infinity_count: usize,
+    pub negative_infinity_count: usize,
+    pub first_non_finite_index: Option<usize>,
+    pub first_non_finite_bits: Option<u32>,
+    pub l2_norm: f32,
+}
+
+/// Fresh prefix recomputations with immediate readback around the BERT sentence
+/// boundary. These barriers intentionally perturb asynchronous execution, so
+/// the trace records each prefix independently instead of treating shallow
+/// tensor clones as historical snapshots.
+#[cfg(feature = "bert-validation")]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BertSentenceTrace {
+    pub schema: &'static str,
+    pub input_host: Vec<i64>,
+    pub input_device: Vec<i32>,
+    pub input_round_trip_matches: bool,
+    pub embedding_word_weight: BertFloatTrace,
+    pub embedding_position_weight: BertFloatTrace,
+    pub embedding_token_type_weight: BertFloatTrace,
+    pub position_ids_immediate: Vec<i32>,
+    pub token_type_ids_immediate: Vec<i32>,
+    pub embedding_word_immediate: BertFloatTrace,
+    pub embedding_position_immediate: BertFloatTrace,
+    pub embedding_token_type_immediate: BertFloatTrace,
+    pub embedding_word_position_sum_immediate: BertFloatTrace,
+    pub embedding_sum_immediate: BertFloatTrace,
+    pub embeddings_immediate: BertFloatTrace,
+    pub encoded_immediate: BertFloatTrace,
+    pub pooled_immediate: BertFloatTrace,
+    pub normalized_immediate: BertFloatTrace,
+}
+
 impl BertEmbeddingProvider {
     /// Construct an unloaded provider. `embed` returns
     /// [`EmbedError::ModelNotLoaded`] until [`Self::with_model`] and
@@ -167,6 +211,124 @@ impl BertEmbeddingProvider {
         })
     }
 
+    /// Run one sentence with an awaited device readback at each major BERT
+    /// boundary. Enabled only for validation and browser-probe builds.
+    #[cfg(feature = "bert-validation")]
+    pub async fn trace_one_async(&self, text: &str) -> Result<BertSentenceTrace, EmbedError> {
+        let model = self.model.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
+        let tokenizer = self.tokenizer.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
+        let batch = tokenizer.encode_batch(&[text])?;
+        let input_host = batch.input_ids;
+        let input_ids: Tensor<2, Int> = Tensor::from_data(
+            TensorData::new(input_host.clone(), [batch.batch_size, batch.seq_len]),
+            &self.device,
+        );
+        let input_shape = [batch.batch_size, batch.seq_len];
+        let input_device = input_ids
+            .clone()
+            .into_data_async()
+            .await
+            .map_err(|e| EmbedError::Backend(format!("input trace readback: {e:?}")))?
+            .to_vec::<i32>()
+            .map_err(|e| EmbedError::Backend(format!("input trace to Vec<i32>: {e:?}")))?;
+
+        let embedding_word_immediate = trace_float_tensor(
+            model.forward_word_embedding(input_ids),
+            "immediate word embedding",
+        )
+        .await?;
+        let fresh_input = || {
+            Tensor::<2, Int>::from_data(
+                TensorData::new(input_host.clone(), input_shape),
+                &self.device,
+            )
+        };
+        let position_ids_immediate = trace_int_tensor(
+            model.forward_position_ids(fresh_input()),
+            "immediate position ids",
+        )
+        .await?;
+        let token_type_ids_immediate = trace_int_tensor(
+            model.forward_token_type_ids(fresh_input()),
+            "immediate token type ids",
+        )
+        .await?;
+        let embedding_position_immediate = trace_float_tensor(
+            model.forward_position_embedding(fresh_input()),
+            "immediate position embedding",
+        )
+        .await?;
+        let embedding_token_type_immediate = trace_float_tensor(
+            model.forward_token_type_embedding(fresh_input()),
+            "immediate token type embedding",
+        )
+        .await?;
+        let embedding_word_position_sum_immediate = trace_float_tensor(
+            model.forward_word_position_sum(fresh_input()),
+            "immediate word plus position embedding",
+        )
+        .await?;
+        let embedding_sum_immediate = trace_float_tensor(
+            model.forward_embedding_sum(fresh_input()),
+            "immediate embedding sum",
+        )
+        .await?;
+        let embeddings_immediate = trace_float_tensor(
+            model.forward_embeddings(fresh_input()),
+            "immediate embedding block",
+        )
+        .await?;
+        let encoded_immediate =
+            trace_float_tensor(model.forward_tokens(fresh_input()), "immediate encoder").await?;
+        let pooled_immediate = trace_float_tensor(
+            model.forward_sentence(fresh_input(), self.pooling, false),
+            "immediate pooling",
+        )
+        .await?;
+        let normalized_immediate = trace_float_tensor(
+            model.forward_sentence(fresh_input(), self.pooling, self.l2_normalize),
+            "immediate normalization",
+        )
+        .await?;
+        let embedding_weights = model.embedding_weights();
+        let embedding_word_weight =
+            trace_float_tensor(embedding_weights.word_weight, "word embedding weight").await?;
+        let embedding_position_weight = trace_float_tensor(
+            embedding_weights.position_weight,
+            "position embedding weight",
+        )
+        .await?;
+        let embedding_token_type_weight = trace_float_tensor(
+            embedding_weights.token_type_weight,
+            "token type embedding weight",
+        )
+        .await?;
+
+        Ok(BertSentenceTrace {
+            schema: "esp.bert-sentence-trace/v8",
+            input_round_trip_matches: input_host
+                .iter()
+                .map(|value| *value as i32)
+                .eq(input_device.iter().copied()),
+            input_host,
+            input_device,
+            embedding_word_weight,
+            embedding_position_weight,
+            embedding_token_type_weight,
+            position_ids_immediate,
+            token_type_ids_immediate,
+            embedding_word_immediate,
+            embedding_position_immediate,
+            embedding_token_type_immediate,
+            embedding_word_position_sum_immediate,
+            embedding_sum_immediate,
+            embeddings_immediate,
+            encoded_immediate,
+            pooled_immediate,
+            normalized_immediate,
+        })
+    }
+
     fn forward_sentence_batch(&self, texts: &[&str]) -> Result<Option<Tensor<2>>, EmbedError> {
         let model = self.model.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
         let tokenizer = self.tokenizer.as_ref().ok_or(EmbedError::ModelNotLoaded)?;
@@ -187,6 +349,60 @@ impl BertEmbeddingProvider {
             self.l2_normalize,
         )))
     }
+}
+
+#[cfg(feature = "bert-validation")]
+async fn trace_int_tensor<const D: usize>(
+    tensor: Tensor<D, Int>,
+    stage: &str,
+) -> Result<Vec<i32>, EmbedError> {
+    tensor
+        .into_data_async()
+        .await
+        .map_err(|e| EmbedError::Backend(format!("{stage} trace readback: {e:?}")))?
+        .to_vec::<i32>()
+        .map_err(|e| EmbedError::Backend(format!("{stage} trace to Vec<i32>: {e:?}")))
+}
+
+#[cfg(feature = "bert-validation")]
+async fn trace_float_tensor<const D: usize>(
+    tensor: Tensor<D>,
+    stage: &str,
+) -> Result<BertFloatTrace, EmbedError> {
+    let dims = tensor.dims().to_vec();
+    let values = tensor
+        .into_data_async()
+        .await
+        .map_err(|e| EmbedError::Backend(format!("{stage} trace readback: {e:?}")))?
+        .to_vec::<f32>()
+        .map_err(|e| EmbedError::Backend(format!("{stage} trace to Vec<f32>: {e:?}")))?;
+    let first_8: Vec<f32> = values.iter().take(8).copied().collect();
+    let first_8_bits = first_8.iter().map(|value| value.to_bits()).collect();
+    let all_finite = values.iter().all(|value| value.is_finite());
+    let nan_count = values.iter().filter(|value| value.is_nan()).count();
+    let positive_infinity_count = values
+        .iter()
+        .filter(|value| **value == f32::INFINITY)
+        .count();
+    let negative_infinity_count = values
+        .iter()
+        .filter(|value| **value == f32::NEG_INFINITY)
+        .count();
+    let first_non_finite_index = values.iter().position(|value| !value.is_finite());
+    let first_non_finite_bits = first_non_finite_index.map(|index| values[index].to_bits());
+    let l2_norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    Ok(BertFloatTrace {
+        dims,
+        first_8,
+        first_8_bits,
+        all_finite,
+        nan_count,
+        positive_infinity_count,
+        negative_infinity_count,
+        first_non_finite_index,
+        first_non_finite_bits,
+        l2_norm,
+    })
 }
 
 fn rows_from_flat(flat: Vec<f32>, dims: [usize; 2]) -> Vec<Vec<f32>> {

@@ -52,6 +52,51 @@ impl BertModel {
         self.encoder.forward(embedded)
     }
 
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_word_embedding(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.embeddings.forward_word(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_position_ids(&self, input_ids: Tensor<2, Int>) -> Tensor<2, Int> {
+        self.embeddings.forward_position_ids(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_token_type_ids(&self, input_ids: Tensor<2, Int>) -> Tensor<2, Int> {
+        self.embeddings.forward_token_type_ids(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_position_embedding(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.embeddings.forward_position(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_token_type_embedding(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.embeddings.forward_token_type(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_word_position_sum(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.embeddings.forward_word_position_sum(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_embedding_sum(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.embeddings.forward_sum(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn forward_embeddings(&self, input_ids: Tensor<2, Int>) -> Tensor<3> {
+        self.embeddings.forward(input_ids)
+    }
+
+    #[cfg(feature = "bert-validation")]
+    pub(crate) fn embedding_weights(&self) -> super::embeddings::BertEmbeddingWeights {
+        self.embeddings.weights()
+    }
+
     /// Sentence-level forward: `[B, S]` int → `[B, hidden]` float.
     /// Pools across the sequence dimension; optionally L2-normalises.
     pub fn forward_sentence(
