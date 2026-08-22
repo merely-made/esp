@@ -176,8 +176,8 @@ mod fixture_tests {
 
         for fixture in FIXTURES {
             let v = provider.embed_one(fixture.text).expect("embed");
-            let async_v = pollster::block_on(provider.embed_one_async(fixture.text))
-                .expect("async embed");
+            let async_v =
+                pollster::block_on(provider.embed_one_async(fixture.text)).expect("async embed");
             assert_eq!(
                 v.len(),
                 384,
