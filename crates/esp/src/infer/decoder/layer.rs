@@ -10,10 +10,10 @@
 //! outer, `mlp.down_proj` → `down`.
 
 use burn::module::Param;
-use burn::nn::{Linear, RmsNorm, RmsNormConfig, RotaryEncoding, SwiGlu, SwiGluConfig};
+use burn::nn::{Linear, RmsNorm, RmsNormConfig, SwiGlu, SwiGluConfig};
 use burn::tensor::{Device, Tensor};
 
-use super::attention::{DecoderAttention, linear_no_bias_from_loaded};
+use super::attention::{DecoderAttention, LlamaRotaryEncoding, linear_no_bias_from_loaded};
 use super::config::DecoderConfig;
 
 /// Build an `RmsNorm` whose gamma is the supplied tensor.
@@ -76,7 +76,7 @@ impl DecoderLayer {
     }
 
     /// `x: [batch, seq, hidden]` → same shape.
-    pub fn forward(&self, x: Tensor<3>, rope: &RotaryEncoding, start: usize) -> Tensor<3> {
+    pub fn forward(&self, x: Tensor<3>, rope: &LlamaRotaryEncoding, start: usize) -> Tensor<3> {
         self.forward_cached(
             x,
             rope,
@@ -89,7 +89,7 @@ impl DecoderLayer {
     pub fn forward_cached(
         &self,
         x: Tensor<3>,
-        rope: &RotaryEncoding,
+        rope: &LlamaRotaryEncoding,
         cache: &mut super::attention::LayerKvCache,
         start: usize,
     ) -> Tensor<3> {
@@ -108,7 +108,6 @@ impl DecoderLayer {
 mod tests {
     use super::super::test_support::{t1_ones, t2, tiny_config};
     use super::*;
-    use burn::nn::RotaryEncodingConfig;
 
     // backend chosen per call site via Device
 
@@ -138,9 +137,12 @@ mod tests {
         let config = tiny_config();
         let dev = Device::ndarray();
         let layer = det_layer(&config, 40, &dev);
-        let rope = RotaryEncodingConfig::new(config.max_position_embeddings, config.head_dim())
-            .with_theta(config.rope_theta)
-            .init(&dev);
+        let rope = LlamaRotaryEncoding::new(
+            config.max_position_embeddings,
+            config.head_dim(),
+            config.rope_theta,
+            &dev,
+        );
         let x = t2(5, config.hidden_size, 99, &dev).reshape([1, 5, config.hidden_size]);
 
         let a = layer
@@ -164,7 +166,6 @@ mod tests {
 mod tests_wgpu {
     use super::super::test_support::{det_vec, tiny_config};
     use super::*;
-    use burn::nn::RotaryEncodingConfig;
     use burn::tensor::TensorData;
 
     fn layer_out(config: &DecoderConfig, dev: &Device) -> Vec<f32> {
@@ -190,9 +191,12 @@ mod tests_wgpu {
             },
             &dev,
         );
-        let rope = RotaryEncodingConfig::new(config.max_position_embeddings, config.head_dim())
-            .with_theta(config.rope_theta)
-            .init(&dev);
+        let rope = LlamaRotaryEncoding::new(
+            config.max_position_embeddings,
+            config.head_dim(),
+            config.rope_theta,
+            &dev,
+        );
         let x: Tensor<3> = Tensor::from_data(TensorData::new(det_vec(5 * h, 99), [1, 5, h]), &dev);
         layer
             .forward(x, &rope, 0)

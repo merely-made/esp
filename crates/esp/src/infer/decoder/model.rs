@@ -6,10 +6,10 @@
 //! that class omit `lm_head.weight` entirely.
 
 use burn::module::Param;
-use burn::nn::{Embedding, EmbeddingConfig, Linear, RmsNorm, RotaryEncoding, RotaryEncodingConfig};
+use burn::nn::{Embedding, EmbeddingConfig, Linear, RmsNorm};
 use burn::tensor::{Device, Int, Tensor};
 
-use super::attention::linear_no_bias_from_loaded;
+use super::attention::{LlamaRotaryEncoding, linear_no_bias_from_loaded};
 use super::config::DecoderConfig;
 use super::layer::{DecoderLayer, LoadedDecoderLayer, rms_norm_from_loaded};
 
@@ -40,7 +40,7 @@ pub struct DecoderModel {
     layers: Vec<DecoderLayer>,
     final_norm: RmsNorm,
     lm_head: Linear,
-    rope: RotaryEncoding,
+    rope: LlamaRotaryEncoding,
     config: DecoderConfig,
 }
 
@@ -49,9 +49,12 @@ impl DecoderModel {
         let lm_head_w = loaded
             .lm_head_w
             .unwrap_or_else(|| loaded.embed_w.clone().transpose());
-        let rope = RotaryEncodingConfig::new(config.max_position_embeddings, config.head_dim())
-            .with_theta(config.rope_theta)
-            .init(device);
+        let rope = LlamaRotaryEncoding::new(
+            config.max_position_embeddings,
+            config.head_dim(),
+            config.rope_theta,
+            device,
+        );
         Self {
             embed: embedding_from_loaded(loaded.embed_w, device),
             layers: loaded

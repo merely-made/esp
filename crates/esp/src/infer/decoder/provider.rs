@@ -18,7 +18,7 @@ use std::ops::ControlFlow;
 use tokenizers::Tokenizer;
 
 use super::config::DecoderConfig;
-use super::generate::{TokenPicker, generate_ids_with};
+use super::generate::{TokenPicker, generate_ids_with, generate_ids_with_async};
 use super::loader::load_decoder_from_bytes;
 use super::model::DecoderModel;
 use super::sample::{Sampler, SplitMix64};
@@ -30,6 +30,101 @@ pub struct DecoderProvider {
     model: DecoderModel,
     tokenizer: Tokenizer,
     capability: ModelCapability,
+}
+
+/// Decoder-specific details that the portable [`InferenceProvider`] seam does
+/// not expose. Distillery's measurement harness uses the generated ids to
+/// report token throughput rather than mistaking detokenized text fragments
+/// for tokens.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecoderGeneration {
+    /// Complete emitted text, identical to the return from
+    /// [`InferenceProvider::generate_streaming`].
+    pub text: String,
+    /// Generated token ids, excluding the prompt and EOS.
+    pub token_ids: Vec<u32>,
+    /// Number of non-empty detokenized fragments delivered to the caller.
+    pub emitted_fragments: usize,
+    /// Whether the caller's fragment callback requested an early stop.
+    pub stopped_by_callback: bool,
+}
+
+struct StreamObserver<'a> {
+    provider: &'a DecoderProvider,
+    request: &'a GenerationRequest,
+    on_fragment: &'a mut dyn FnMut(&str) -> ControlFlow<()>,
+    on_generated_token: &'a mut dyn FnMut(u32),
+    generated_ids: Vec<u32>,
+    emitted: String,
+    emitted_fragments: usize,
+    stopped_by_callback: bool,
+    decode_error: Option<InferError>,
+}
+
+impl<'a> StreamObserver<'a> {
+    fn new(
+        provider: &'a DecoderProvider,
+        request: &'a GenerationRequest,
+        on_fragment: &'a mut dyn FnMut(&str) -> ControlFlow<()>,
+        on_generated_token: &'a mut dyn FnMut(u32),
+    ) -> Self {
+        Self {
+            provider,
+            request,
+            on_fragment,
+            on_generated_token,
+            generated_ids: Vec::new(),
+            emitted: String::new(),
+            emitted_fragments: 0,
+            stopped_by_callback: false,
+            decode_error: None,
+        }
+    }
+
+    fn observe(&mut self, token: u32) -> ControlFlow<()> {
+        (self.on_generated_token)(token);
+        self.generated_ids.push(token);
+        let full = match self.provider.decode(&self.generated_ids) {
+            Ok(full) => full,
+            Err(error) => {
+                self.decode_error = Some(error);
+                return ControlFlow::Break(());
+            }
+        };
+        // Hold back non-prefix decodes (mid-byte BPE boundary); the text
+        // arrives with a later token.
+        if !full.starts_with(&self.emitted) || full.len() == self.emitted.len() {
+            return ControlFlow::Continue(());
+        }
+        if self
+            .request
+            .stop
+            .iter()
+            .any(|stop| full.contains(stop.as_str()))
+        {
+            // Truncate before the completing fragment, like
+            // StubInferenceProvider: nothing past the stop is emitted.
+            return ControlFlow::Break(());
+        }
+        let delta = full[self.emitted.len()..].to_string();
+        let flow = (self.on_fragment)(&delta);
+        self.emitted_fragments += 1;
+        self.emitted = full;
+        self.stopped_by_callback = flow.is_break();
+        flow
+    }
+
+    fn finish(self, token_ids: Vec<u32>) -> Result<DecoderGeneration, InferError> {
+        if let Some(error) = self.decode_error {
+            return Err(error);
+        }
+        Ok(DecoderGeneration {
+            text: self.emitted,
+            token_ids,
+            emitted_fragments: self.emitted_fragments,
+            stopped_by_callback: self.stopped_by_callback,
+        })
+    }
 }
 
 impl DecoderProvider {
@@ -77,18 +172,11 @@ impl DecoderProvider {
             .decode(ids, true)
             .map_err(|e| InferError::Backend(format!("detokenize: {e}")))
     }
-}
 
-impl InferenceProvider for DecoderProvider {
-    fn capability(&self) -> &ModelCapability {
-        &self.capability
-    }
-
-    fn generate_streaming(
+    fn prepare_generation(
         &self,
         request: &GenerationRequest,
-        on_token: &mut dyn FnMut(&str) -> ControlFlow<()>,
-    ) -> Result<String, InferError> {
+    ) -> Result<(Vec<u32>, usize, TokenPicker), InferError> {
         if request.prompt.is_empty() {
             return Err(InferError::InvalidRequest("empty prompt".to_string()));
         }
@@ -101,7 +189,7 @@ impl InferenceProvider for DecoderProvider {
                 request.temperature
             )));
         }
-        let mut picker = if request.temperature == 0.0 {
+        let picker = if request.temperature == 0.0 {
             TokenPicker::Greedy
         } else {
             let seed = request.seed.unwrap_or_else(|| {
@@ -127,47 +215,68 @@ impl InferenceProvider for DecoderProvider {
             });
         }
         let max_new = request.max_tokens.min(window - prompt_ids.len());
+        Ok((prompt_ids, max_new, picker))
+    }
 
-        let mut generated_ids: Vec<u32> = Vec::new();
-        let mut emitted = String::new();
-        let mut decode_error: Option<InferError> = None;
-
-        generate_ids_with(
+    /// Generate with decoder-specific token observation in addition to the
+    /// portable text-fragment callback. `on_generated_token` is observational;
+    /// cancellation retains the `InferenceProvider` callback semantics.
+    pub fn generate_streaming_observed(
+        &self,
+        request: &GenerationRequest,
+        on_fragment: &mut dyn FnMut(&str) -> ControlFlow<()>,
+        on_generated_token: &mut dyn FnMut(u32),
+    ) -> Result<DecoderGeneration, InferError> {
+        let (prompt_ids, max_new, mut picker) = self.prepare_generation(request)?;
+        let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
+        let token_ids = generate_ids_with(
             &self.model,
             &prompt_ids,
             max_new,
             &self.model.config().eos_token_id,
             &mut picker,
-            &mut |token| {
-                generated_ids.push(token);
-                let full = match self.decode(&generated_ids) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        decode_error = Some(e);
-                        return ControlFlow::Break(());
-                    }
-                };
-                // Hold back non-prefix decodes (mid-byte BPE boundary);
-                // the text arrives with a later token.
-                if !full.starts_with(&emitted) || full.len() == emitted.len() {
-                    return ControlFlow::Continue(());
-                }
-                if request.stop.iter().any(|s| full.contains(s.as_str())) {
-                    // Truncate before the completing fragment, like
-                    // StubInferenceProvider: nothing past the stop is emitted.
-                    return ControlFlow::Break(());
-                }
-                let delta = full[emitted.len()..].to_string();
-                let flow = on_token(&delta);
-                emitted = full;
-                flow
-            },
+            &mut |token| observer.observe(token),
         );
+        observer.finish(token_ids)
+    }
 
-        if let Some(error) = decode_error {
-            return Err(error);
-        }
-        Ok(emitted)
+    /// Promise-backed counterpart to [`Self::generate_streaming_observed`].
+    /// Use this for browser WebGPU, where reading a generated token must yield
+    /// to the host event loop instead of blocking the worker.
+    pub async fn generate_streaming_observed_async(
+        &self,
+        request: &GenerationRequest,
+        on_fragment: &mut dyn FnMut(&str) -> ControlFlow<()>,
+        on_generated_token: &mut dyn FnMut(u32),
+    ) -> Result<DecoderGeneration, InferError> {
+        let (prompt_ids, max_new, mut picker) = self.prepare_generation(request)?;
+        let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
+        let token_ids = generate_ids_with_async(
+            &self.model,
+            &prompt_ids,
+            max_new,
+            &self.model.config().eos_token_id,
+            &mut picker,
+            &mut |token| observer.observe(token),
+        )
+        .await
+        .map_err(InferError::Backend)?;
+        observer.finish(token_ids)
+    }
+}
+
+impl InferenceProvider for DecoderProvider {
+    fn capability(&self) -> &ModelCapability {
+        &self.capability
+    }
+
+    fn generate_streaming(
+        &self,
+        request: &GenerationRequest,
+        on_token: &mut dyn FnMut(&str) -> ControlFlow<()>,
+    ) -> Result<String, InferError> {
+        self.generate_streaming_observed(request, on_token, &mut |_| {})
+            .map(|generation| generation.text)
     }
 }
 
@@ -233,6 +342,23 @@ mod tests {
         }
         // Deterministic (greedy).
         assert_eq!(p.generate(&request("t1 t5", 6)).unwrap(), full);
+    }
+
+    #[test]
+    fn observed_generation_counts_model_tokens_not_text_fragments() {
+        let p = provider();
+        let mut observed = Vec::new();
+        let generation = p
+            .generate_streaming_observed(
+                &request("t1 t5", 6),
+                &mut |_| ControlFlow::Continue(()),
+                &mut |token| observed.push(token),
+            )
+            .unwrap();
+        assert_eq!(generation.token_ids, observed);
+        assert_eq!(generation.token_ids.len(), 6);
+        assert!(!generation.stopped_by_callback);
+        assert!(generation.emitted_fragments <= generation.token_ids.len());
     }
 
     #[test]

@@ -16,11 +16,83 @@
 //! cached path is proven equal to naive full recompute by the
 //! generation tests.
 
-use burn::nn::{Linear, LinearConfig, RotaryEncoding};
+use burn::nn::{Linear, LinearConfig};
 use burn::tensor::activation::softmax;
-use burn::tensor::{Bool, Device, Tensor};
+use burn::tensor::{Bool, Device, Tensor, TensorData};
 
 use super::config::DecoderConfig;
+
+/// Llama's split-half rotary layout.
+///
+/// Burn's general `RotaryEncoding` rotates adjacent pairs (`x[0]` with
+/// `x[1]`). Llama-family checkpoints are trained with `rotate_half`, pairing
+/// the first half of a head with the second (`x[0]` with `x[d/2]`). The two
+/// layouts are not interchangeable for released weights.
+#[derive(Debug)]
+pub struct LlamaRotaryEncoding {
+    cos: Tensor<2>,
+    sin: Tensor<2>,
+}
+
+impl LlamaRotaryEncoding {
+    /// Precompute Llama rotary frequencies through the configured context
+    /// window.
+    pub fn new(max_sequence_length: usize, head_dim: usize, theta: f32, device: &Device) -> Self {
+        assert!(head_dim.is_multiple_of(2), "rotary head_dim must be even");
+        let half = head_dim / 2;
+        let mut cos = Vec::with_capacity(max_sequence_length * head_dim);
+        let mut sin = Vec::with_capacity(max_sequence_length * head_dim);
+        for position in 0..max_sequence_length {
+            let mut row_cos = Vec::with_capacity(half);
+            let mut row_sin = Vec::with_capacity(half);
+            for index in 0..half {
+                let inverse_frequency = 1.0 / theta.powf((2 * index) as f32 / head_dim as f32);
+                let angle = position as f32 * inverse_frequency;
+                row_cos.push(angle.cos());
+                row_sin.push(angle.sin());
+            }
+            cos.extend_from_slice(&row_cos);
+            cos.extend_from_slice(&row_cos);
+            sin.extend_from_slice(&row_sin);
+            sin.extend_from_slice(&row_sin);
+        }
+        Self {
+            cos: Tensor::from_data(
+                TensorData::new(cos, [max_sequence_length, head_dim]),
+                device,
+            ),
+            sin: Tensor::from_data(
+                TensorData::new(sin, [max_sequence_length, head_dim]),
+                device,
+            ),
+        }
+    }
+
+    /// Rotate `[batch, heads, sequence, head_dim]` queries or keys beginning
+    /// at the supplied absolute token position.
+    pub fn apply(&self, input: Tensor<4>, start: usize) -> Tensor<4> {
+        let [batch, heads, sequence, head_dim] = input.dims();
+        let half = head_dim / 2;
+        let cos = self
+            .cos
+            .clone()
+            .slice([start..start + sequence, 0..head_dim])
+            .reshape([1, 1, sequence, head_dim]);
+        let sin = self
+            .sin
+            .clone()
+            .slice([start..start + sequence, 0..head_dim])
+            .reshape([1, 1, sequence, head_dim]);
+        let first = input
+            .clone()
+            .slice([0..batch, 0..heads, 0..sequence, 0..half]);
+        let second = input
+            .clone()
+            .slice([0..batch, 0..heads, 0..sequence, half..head_dim]);
+        let rotated = Tensor::cat(vec![second.mul_scalar(-1.0), first], 3);
+        input * cos + rotated * sin
+    }
+}
 
 /// Per-layer key/value cache: `[batch, kv_heads, seq_so_far, head_dim]`,
 /// stored pre-GQA-expansion (memory-optimal; expansion happens per step).
@@ -97,7 +169,7 @@ impl DecoderAttention {
     /// `x: [batch, seq, hidden]`; `rope` is the model-owned rotary table
     /// (one per model, shared by all layers); `start` is the absolute
     /// position of `x`'s first token.
-    pub fn forward(&self, x: Tensor<3>, rope: &RotaryEncoding, start: usize) -> Tensor<3> {
+    pub fn forward(&self, x: Tensor<3>, rope: &LlamaRotaryEncoding, start: usize) -> Tensor<3> {
         self.forward_cached(x, rope, &mut LayerKvCache::default(), start)
     }
 
@@ -110,7 +182,7 @@ impl DecoderAttention {
     pub fn forward_cached(
         &self,
         x: Tensor<3>,
-        rope: &RotaryEncoding,
+        rope: &LlamaRotaryEncoding,
         cache: &mut LayerKvCache,
         start: usize,
     ) -> Tensor<3> {
@@ -181,14 +253,16 @@ impl DecoderAttention {
 mod tests {
     use super::super::test_support::{t2, tiny_config};
     use super::*;
-    use burn::nn::RotaryEncodingConfig;
 
     // backend chosen per call site via Device
 
-    fn rope(config: &DecoderConfig) -> RotaryEncoding {
-        RotaryEncodingConfig::new(config.max_position_embeddings, config.head_dim())
-            .with_theta(config.rope_theta)
-            .init(&Device::ndarray())
+    fn rope(config: &DecoderConfig) -> LlamaRotaryEncoding {
+        LlamaRotaryEncoding::new(
+            config.max_position_embeddings,
+            config.head_dim(),
+            config.rope_theta,
+            &Device::ndarray(),
+        )
     }
 
     fn attention(config: &DecoderConfig) -> DecoderAttention {
@@ -213,6 +287,29 @@ mod tests {
             t2(5, config.hidden_size, 99, &Device::ndarray()).reshape([1, 5, config.hidden_size]);
         let out = attn.forward(x, &rope(&config), 0);
         assert_eq!(out.dims(), [1, 5, config.hidden_size]);
+    }
+
+    #[test]
+    fn rotary_pairs_split_halves_like_llama() {
+        let device = Device::ndarray();
+        let rope = LlamaRotaryEncoding::new(4, 4, 10_000.0, &device);
+        let input = Tensor::from_data([[[[1.0, 2.0, 3.0, 4.0]]]], &device);
+        let output = rope.apply(input, 1).into_data().to_vec::<f32>().unwrap();
+        let angle0 = 1.0_f32;
+        let angle1 = 1.0_f32 / 100.0;
+        let expected = [
+            1.0 * angle0.cos() - 3.0 * angle0.sin(),
+            2.0 * angle1.cos() - 4.0 * angle1.sin(),
+            3.0 * angle0.cos() + 1.0 * angle0.sin(),
+            4.0 * angle1.cos() + 2.0 * angle1.sin(),
+        ];
+        assert!(
+            output
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() < 1.0e-6),
+            "split-half rotary mismatch: {output:?}"
+        );
     }
 
     /// The causal-mask probe: perturbing the LAST token must not change
@@ -261,7 +358,11 @@ mod tests {
         );
     }
 
-    fn perturbed_out(attn: &DecoderAttention, x: Tensor<3>, rope: &RotaryEncoding) -> Vec<f32> {
+    fn perturbed_out(
+        attn: &DecoderAttention,
+        x: Tensor<3>,
+        rope: &LlamaRotaryEncoding,
+    ) -> Vec<f32> {
         attn.forward(x, rope, 0)
             .into_data()
             .to_vec::<f32>()

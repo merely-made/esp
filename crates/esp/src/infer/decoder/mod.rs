@@ -27,16 +27,16 @@ pub mod provider;
 pub mod sample;
 pub mod tensors;
 
-pub use attention::{DecoderAttention, LayerKvCache};
+pub use attention::{DecoderAttention, LayerKvCache, LlamaRotaryEncoding};
 pub use config::DecoderConfig;
-pub use generate::{TokenPicker, generate_ids, generate_ids_with};
+pub use generate::{TokenPicker, generate_ids, generate_ids_with, generate_ids_with_async};
 pub use layer::{DecoderLayer, LoadedDecoderLayer};
 pub use loader::load_decoder_from_bytes;
 pub use model::{DecoderModel, KvCache, LoadedDecoder};
 
 #[cfg(feature = "decoder-wgpu")]
 use burn::tensor::Device;
-pub use provider::DecoderProvider;
+pub use provider::{DecoderGeneration, DecoderProvider};
 pub use sample::Sampler;
 
 /// The decoder on the wgpu backend — the concrete inference lane hosts use
