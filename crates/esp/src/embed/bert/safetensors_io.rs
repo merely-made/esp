@@ -2,12 +2,11 @@
 //!
 //! `safetensors` stores tensors as raw little-endian bytes plus a JSON
 //! header describing dtype + shape. This module is the bytes → tensor
-//! bridge: validate dtype + shape, decode f32, hand back to Burn.
-//!
-//! Sentence-transformers BERT models are stored as f32. Anything else
-//! returns [`LoaderError::InvalidWeights`] — we don't auto-cast.
+//! bridge: validate dtype + shape, decode F32 or F16 into Burn's f32 tensors,
+//! and reject every other published dtype explicitly.
 
 use burn::tensor::{Device, Tensor, TensorData};
+use half::f16;
 use safetensors::tensor::{Dtype, TensorView};
 
 use super::loader::LoaderError;
@@ -37,25 +36,35 @@ pub fn extract<const D: usize>(
             "shape mismatch: expected {expected_shape:?}, got {shape_array:?}"
         )));
     }
-    if view.dtype() != Dtype::F32 {
-        return Err(LoaderError::InvalidWeights(format!(
-            "expected f32, got {:?} (auto-casting is intentionally not supported)",
-            view.dtype()
-        )));
-    }
     let bytes = view.data();
     let elem_count: usize = expected_shape.iter().product();
-    if bytes.len() != elem_count * 4 {
+    let bytes_per_element = match view.dtype() {
+        Dtype::F32 => 4,
+        Dtype::F16 => 2,
+        dtype => {
+            return Err(LoaderError::InvalidWeights(format!(
+                "expected F32 or F16, got {dtype:?}"
+            )));
+        }
+    };
+    if bytes.len() != elem_count * bytes_per_element {
         return Err(LoaderError::InvalidWeights(format!(
             "byte-count mismatch: shape {expected_shape:?} implies {} bytes, got {}",
-            elem_count * 4,
+            elem_count * bytes_per_element,
             bytes.len()
         )));
     }
-    let data: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let data: Vec<f32> = match view.dtype() {
+        Dtype::F32 => bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+        Dtype::F16 => bytes
+            .chunks_exact(2)
+            .map(|chunk| f16::from_le_bytes([chunk[0], chunk[1]]).to_f32())
+            .collect(),
+        _ => unreachable!("unsupported dtypes returned above"),
+    };
     let tensor_data = TensorData::new(data, expected_shape);
     Ok(Tensor::from_data(tensor_data, device))
 }
@@ -140,11 +149,23 @@ mod tests {
     }
 
     #[test]
-    fn non_f32_dtype_errors() {
+    fn extract_1d_decodes_f16_to_f32() {
         let device = Device::ndarray();
-        // Build a synthetic f16 view (2 bytes per element).
-        let raw_bytes: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let expected = [1.0_f32, -2.0, 0.5, 65_504.0];
+        let raw_bytes = expected
+            .iter()
+            .flat_map(|value| f16::from_f32(*value).to_le_bytes())
+            .collect::<Vec<_>>();
         let view = make_view(Dtype::F16, vec![4], &raw_bytes);
+        let tensor = extract_1d(&view, 4, &device).unwrap();
+        assert_eq!(tensor.into_data().to_vec::<f32>().unwrap(), expected);
+    }
+
+    #[test]
+    fn unsupported_dtype_errors() {
+        let device = Device::ndarray();
+        let raw_bytes = vec![0; 8];
+        let view = make_view(Dtype::BF16, vec![4], &raw_bytes);
         let result = extract_1d(&view, 4, &device);
         assert!(matches!(result, Err(LoaderError::InvalidWeights(_))));
     }

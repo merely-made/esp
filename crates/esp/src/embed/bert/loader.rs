@@ -290,7 +290,7 @@ pub enum ValidationIssue {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
-    DtypeNotF32 {
+    UnsupportedDtype {
         name: String,
         actual: String,
     },
@@ -335,8 +335,11 @@ pub fn validate_weights_from_bytes(
                 actual: actual_shape,
             });
         }
-        if view.dtype() != safetensors::tensor::Dtype::F32 {
-            issues.push(ValidationIssue::DtypeNotF32 {
+        if !matches!(
+            view.dtype(),
+            safetensors::tensor::Dtype::F32 | safetensors::tensor::Dtype::F16
+        ) {
+            issues.push(ValidationIssue::UnsupportedDtype {
                 name: spec.name.clone(),
                 actual: format!("{:?}", view.dtype()),
             });

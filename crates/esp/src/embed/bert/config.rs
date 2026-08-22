@@ -59,8 +59,9 @@ impl BertConfig {
 // surfaced as presets because their licenses aren't OSI-approved.
 
 /// Configuration for `sentence-transformers/all-MiniLM-L6-v2` — the
-/// recommended first-bundled embedding model (Apache 2.0, ~22 MB on disk,
-/// 384-dim output, 6 layers).
+/// recommended first-bundled embedding model (Apache 2.0, 90.9 MB published
+/// F32 safetensors artifact, 22.7 million parameters, 384-dim output, 6
+/// layers).
 ///
 /// Empirically validated: Burn-side BERT matches HF reference vectors
 /// within 1e-4 across reference texts. See `bert/validation.rs`.
@@ -78,14 +79,14 @@ pub const MINILM_L6_V2: BertConfig = BertConfig {
 };
 
 /// Configuration for `Snowflake/snowflake-arctic-embed-xs` — Apache 2.0,
-/// 384-dim output, 22 MB on disk. Same hidden-size as MiniLM but a deeper
-/// 12-layer stack; trained with retrieval-tuned objectives that often
-/// outperform MiniLM on search tasks despite the same parameter count
-/// being in a thinner range. Drop-in compatible with `BertEmbeddingProvider`.
+/// 90.3 MB published F32 safetensors artifact, 22.6 million parameters,
+/// 384-dim output, and 6 layers. It is based on MiniLM and keeps the same
+/// architecture while changing the retrieval training. Artifact-specific
+/// pooling remains caller configuration.
 pub const SNOWFLAKE_ARCTIC_EMBED_XS: BertConfig = BertConfig {
     vocab_size: 30_522,
     hidden_size: 384,
-    num_hidden_layers: 12,
+    num_hidden_layers: 6,
     num_attention_heads: 12,
     intermediate_size: 1_536,
     max_position_embeddings: 512,
@@ -95,11 +96,11 @@ pub const SNOWFLAKE_ARCTIC_EMBED_XS: BertConfig = BertConfig {
     pad_token_id: 0,
 };
 
-/// Configuration for `TaylorAI/bge-micro-v2` — MIT, 384-dim output,
-/// ~17 MB on disk. The smallest viable BERT-class embedding model;
-/// only 3 transformer layers. Trade quality for size — useful where
-/// disk/RAM are tight (mobile, low-power, CDN-bundled). Drop-in
-/// compatible with `BertEmbeddingProvider`.
+/// Configuration for `TaylorAI/bge-micro-v2` — MIT, 34.8 MB published F16
+/// safetensors artifact, 17.4 million parameters, 384-dim output, and 3
+/// transformer layers. The loader promotes its F16 weights to Burn f32
+/// tensors at construction time. Drop-in compatible with
+/// `BertEmbeddingProvider`.
 pub const BGE_MICRO_V2: BertConfig = BertConfig {
     vocab_size: 30_522,
     hidden_size: 384,
@@ -195,7 +196,7 @@ mod tests {
     fn snowflake_arctic_embed_xs_shape() {
         let c = SNOWFLAKE_ARCTIC_EMBED_XS.clone();
         assert_eq!(c.hidden_size, 384);
-        assert_eq!(c.num_hidden_layers, 12); // deeper than MiniLM-L6
+        assert_eq!(c.num_hidden_layers, 6);
         assert_eq!(c.head_dim(), 32);
     }
 
