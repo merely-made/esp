@@ -18,7 +18,7 @@ use std::ops::ControlFlow;
 use tokenizers::Tokenizer;
 
 use super::config::DecoderConfig;
-use super::generate::{TokenPicker, generate_ids_with, generate_ids_with_async};
+use super::generate::{TokenPicker, generate_ids_with, generate_ids_with_async_controlled};
 use super::loader::load_decoder_from_bytes;
 use super::model::DecoderModel;
 use super::sample::{Sampler, SplitMix64};
@@ -47,6 +47,8 @@ pub struct DecoderGeneration {
     pub emitted_fragments: usize,
     /// Whether the caller's fragment callback requested an early stop.
     pub stopped_by_callback: bool,
+    /// Whether an async host cancelled before the next token was emitted.
+    pub cooperatively_cancelled: bool,
 }
 
 struct StreamObserver<'a> {
@@ -114,7 +116,11 @@ impl<'a> StreamObserver<'a> {
         flow
     }
 
-    fn finish(self, token_ids: Vec<u32>) -> Result<DecoderGeneration, InferError> {
+    fn finish(
+        self,
+        token_ids: Vec<u32>,
+        cooperatively_cancelled: bool,
+    ) -> Result<DecoderGeneration, InferError> {
         if let Some(error) = self.decode_error {
             return Err(error);
         }
@@ -123,6 +129,7 @@ impl<'a> StreamObserver<'a> {
             token_ids,
             emitted_fragments: self.emitted_fragments,
             stopped_by_callback: self.stopped_by_callback,
+            cooperatively_cancelled,
         })
     }
 }
@@ -237,7 +244,7 @@ impl DecoderProvider {
             &mut picker,
             &mut |token| observer.observe(token),
         );
-        observer.finish(token_ids)
+        observer.finish(token_ids, false)
     }
 
     /// Promise-backed counterpart to [`Self::generate_streaming_observed`].
@@ -249,19 +256,38 @@ impl DecoderProvider {
         on_fragment: &mut dyn FnMut(&str) -> ControlFlow<()>,
         on_generated_token: &mut dyn FnMut(u32),
     ) -> Result<DecoderGeneration, InferError> {
+        self.generate_streaming_observed_async_controlled(
+            request,
+            on_fragment,
+            on_generated_token,
+            &mut || false,
+        )
+        .await
+    }
+
+    /// Promise-backed generation with cooperative cancellation checked before
+    /// a newly read token crosses the observer boundary.
+    pub async fn generate_streaming_observed_async_controlled(
+        &self,
+        request: &GenerationRequest,
+        on_fragment: &mut dyn FnMut(&str) -> ControlFlow<()>,
+        on_generated_token: &mut dyn FnMut(u32),
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<DecoderGeneration, InferError> {
         let (prompt_ids, max_new, mut picker) = self.prepare_generation(request)?;
         let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
-        let token_ids = generate_ids_with_async(
+        let outcome = generate_ids_with_async_controlled(
             &self.model,
             &prompt_ids,
             max_new,
             &self.model.config().eos_token_id,
             &mut picker,
+            should_cancel,
             &mut |token| observer.observe(token),
         )
         .await
         .map_err(InferError::Backend)?;
-        observer.finish(token_ids)
+        observer.finish(outcome.token_ids, outcome.cancelled)
     }
 }
 
@@ -358,7 +384,32 @@ mod tests {
         assert_eq!(generation.token_ids, observed);
         assert_eq!(generation.token_ids.len(), 6);
         assert!(!generation.stopped_by_callback);
+        assert!(!generation.cooperatively_cancelled);
         assert!(generation.emitted_fragments <= generation.token_ids.len());
+    }
+
+    #[test]
+    fn async_control_cancels_before_the_next_observed_token() {
+        use std::cell::Cell;
+
+        let p = provider();
+        let observed = Cell::new(0usize);
+        let mut fragments = Vec::new();
+        let generation = pollster::block_on(p.generate_streaming_observed_async_controlled(
+            &request("t1 t5", 6),
+            &mut |fragment| {
+                fragments.push(fragment.to_string());
+                ControlFlow::Continue(())
+            },
+            &mut |_| observed.set(observed.get() + 1),
+            &mut || observed.get() == 1,
+        ))
+        .expect("controlled generation");
+        assert!(generation.cooperatively_cancelled);
+        assert!(!generation.stopped_by_callback);
+        assert_eq!(generation.token_ids.len(), 1);
+        assert_eq!(observed.get(), 1);
+        assert_eq!(fragments.concat(), generation.text);
     }
 
     #[test]

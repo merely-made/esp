@@ -29,7 +29,10 @@ pub mod tensors;
 
 pub use attention::{DecoderAttention, LayerKvCache, LlamaRotaryEncoding};
 pub use config::DecoderConfig;
-pub use generate::{TokenPicker, generate_ids, generate_ids_with, generate_ids_with_async};
+pub use generate::{
+    AsyncGenerationOutcome, TokenPicker, generate_ids, generate_ids_with, generate_ids_with_async,
+    generate_ids_with_async_controlled,
+};
 pub use layer::{DecoderLayer, LoadedDecoderLayer};
 pub use loader::load_decoder_from_bytes;
 pub use model::{DecoderModel, KvCache, LoadedDecoder};

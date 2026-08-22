@@ -161,6 +161,42 @@ pub async fn generate_ids_with_async(
     picker: &mut TokenPicker,
     on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
 ) -> Result<Vec<u32>, String> {
+    generate_ids_with_async_controlled(
+        model,
+        prompt_ids,
+        max_new,
+        eos,
+        picker,
+        &mut || false,
+        on_token,
+    )
+    .await
+    .map(|outcome| outcome.token_ids)
+}
+
+/// Result of promise-backed generation with a host-supplied cancellation
+/// check. A cancelled token has completed device readback but is not added to
+/// the output or delivered to the observer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncGenerationOutcome {
+    /// Generated token ids that crossed the observer boundary.
+    pub token_ids: Vec<u32>,
+    /// Whether the host cancelled before the next token was emitted.
+    pub cancelled: bool,
+}
+
+/// Async generation with a cooperative host cancellation check at the token
+/// boundary. Browser workers can update the flag while token readback yields
+/// to the event loop.
+pub async fn generate_ids_with_async_controlled(
+    model: &DecoderModel,
+    prompt_ids: &[u32],
+    max_new: usize,
+    eos: &[u32],
+    picker: &mut TokenPicker,
+    should_cancel: &mut dyn FnMut() -> bool,
+    on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
+) -> Result<AsyncGenerationOutcome, String> {
     if prompt_ids.is_empty() {
         return Err("prompt must not be empty".to_string());
     }
@@ -177,6 +213,12 @@ pub async fn generate_ids_with_async(
     let mut out = Vec::new();
     for _ in 0..max_new {
         let token = picker.pick_async(&logits).await?;
+        if should_cancel() {
+            return Ok(AsyncGenerationOutcome {
+                token_ids: out,
+                cancelled: true,
+            });
+        }
         if eos.contains(&token) {
             break;
         }
@@ -190,7 +232,10 @@ pub async fn generate_ids_with_async(
         );
         logits = model.forward_cached(step, &mut cache);
     }
-    Ok(out)
+    Ok(AsyncGenerationOutcome {
+        token_ids: out,
+        cancelled: false,
+    })
 }
 
 /// Reference implementation for the tests: no cache, full recompute of
@@ -322,5 +367,30 @@ mod tests {
         ))
         .expect("async token readback");
         assert_eq!(async_ids, sync);
+    }
+
+    #[test]
+    fn async_control_cancels_before_the_next_token_is_observed() {
+        use std::cell::Cell;
+
+        let m = model();
+        let prompt = [1u32, 5, 9, 2];
+        let observed = Cell::new(0usize);
+        let outcome = pollster::block_on(generate_ids_with_async_controlled(
+            &m,
+            &prompt,
+            8,
+            &[],
+            &mut TokenPicker::Greedy,
+            &mut || observed.get() == 1,
+            &mut |_| {
+                observed.set(observed.get() + 1);
+                ControlFlow::Continue(())
+            },
+        ))
+        .expect("controlled async token readback");
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.token_ids.len(), 1);
+        assert_eq!(observed.get(), 1);
     }
 }
