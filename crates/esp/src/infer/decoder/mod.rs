@@ -22,6 +22,8 @@ pub mod config;
 pub mod generate;
 pub mod layer;
 pub mod loader;
+#[cfg(feature = "decoder-lora")]
+pub mod lora;
 pub mod model;
 pub mod provider;
 pub mod sample;
@@ -39,6 +41,8 @@ pub use model::{DecoderModel, KvCache, LoadedDecoder};
 
 #[cfg(feature = "decoder-wgpu")]
 use burn::tensor::Device;
+#[cfg(feature = "decoder-lora")]
+pub use lora::{PEFT_LORA_NDARRAY_LOADER, PeftLoraAdapterLoader};
 pub use provider::{DecoderGeneration, DecoderProvider};
 pub use sample::Sampler;
 

@@ -23,7 +23,7 @@ use super::loader::load_decoder_from_bytes;
 use super::model::DecoderModel;
 use super::sample::{Sampler, SplitMix64};
 use crate::infer::provider::{GenerationRequest, InferError, InferenceProvider, ModelCapability};
-use burn::tensor::Device;
+use burn::tensor::{Device, Int, Tensor, TensorData};
 
 /// A llama-family decoder wired to the `InferenceProvider` seam.
 pub struct DecoderProvider {
@@ -172,6 +172,40 @@ impl DecoderProvider {
             .map_err(|e| InferError::InvalidConfig(format!("tokenizer.json parse: {e}")))?;
         let model = load_decoder_from_bytes(&config, weights_bytes, device)?;
         Ok(Self::from_parts(model, tokenizer, model_id, loader))
+    }
+
+    /// Full vocabulary logits for the token immediately following a rendered
+    /// prompt. This decoder-specific diagnostic supports numerical adapter and
+    /// backend receipts without widening the portable provider trait.
+    pub fn next_token_logits(&self, rendered_prompt: &str) -> Result<Vec<f32>, InferError> {
+        if rendered_prompt.is_empty() {
+            return Err(InferError::InvalidRequest("empty prompt".to_string()));
+        }
+        let encoding = self
+            .tokenizer
+            .encode(rendered_prompt, true)
+            .map_err(|error| InferError::InvalidRequest(format!("tokenize: {error}")))?;
+        let prompt_ids = encoding.get_ids();
+        if prompt_ids.len() > self.capability.context_window {
+            return Err(InferError::PromptTooLong {
+                length: prompt_ids.len(),
+                limit: self.capability.context_window,
+            });
+        }
+        let input: Vec<i32> = prompt_ids.iter().map(|&token| token as i32).collect();
+        let logits = self.model.logits(
+            Tensor::<2, Int>::from_data(
+                TensorData::new(input, [1, prompt_ids.len()]),
+                &self.model.device(),
+            ),
+            0,
+        );
+        let [_, sequence, vocabulary] = logits.dims();
+        logits
+            .slice([0..1, (sequence - 1)..sequence, 0..vocabulary])
+            .into_data()
+            .to_vec::<f32>()
+            .map_err(|error| InferError::Backend(format!("decode next-token logits: {error}")))
     }
 
     fn decode(&self, ids: &[u32]) -> Result<String, InferError> {

@@ -24,16 +24,16 @@ fn view<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>, 
         .map_err(|_| InferError::InvalidWeights(format!("missing tensor: {name}")))
 }
 
-/// Build a [`DecoderModel`] from HF `model.safetensors` bytes.
+/// Decode HF `model.safetensors` bytes into resident decoder tensors.
 ///
 /// `lm_head.weight` may be absent when `config.tie_word_embeddings` is
 /// set (Llama 3.2 1B, SmolLM); a checkpoint that omits it *without* the
 /// config flag is rejected rather than silently tied.
-pub fn load_decoder_from_bytes(
+pub(crate) fn load_decoder_tensors_from_bytes(
     config: &DecoderConfig,
     weights: &[u8],
     device: &Device,
-) -> Result<DecoderModel, InferError> {
+) -> Result<LoadedDecoder, InferError> {
     let tensors = SafeTensors::deserialize(weights)
         .map_err(|e| InferError::InvalidWeights(format!("safetensors parse: {e}")))?;
 
@@ -110,7 +110,7 @@ pub fn load_decoder_from_bytes(
         }
     };
 
-    let loaded = LoadedDecoder {
+    Ok(LoadedDecoder {
         embed_w: extract_2d(
             &view(&tensors, "model.embed_tokens.weight")?,
             config.vocab_size,
@@ -120,7 +120,16 @@ pub fn load_decoder_from_bytes(
         layers,
         final_norm_gamma: extract_1d(&view(&tensors, "model.norm.weight")?, h, device)?,
         lm_head_w,
-    };
+    })
+}
+
+/// Build a [`DecoderModel`] from HF `model.safetensors` bytes.
+pub fn load_decoder_from_bytes(
+    config: &DecoderConfig,
+    weights: &[u8],
+    device: &Device,
+) -> Result<DecoderModel, InferError> {
+    let loaded = load_decoder_tensors_from_bytes(config, weights, device)?;
     Ok(DecoderModel::from_loaded(config.clone(), loaded, device))
 }
 

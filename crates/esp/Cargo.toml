@@ -54,10 +54,12 @@ default = []
 actor = ["dep:armillary"]
 decoder = ["dep:burn", "dep:serde_json", "dep:safetensors", "dep:half", "dep:tokenizers", "dep:tracing", "dep:getrandom"]
 decoder-wgpu = ["decoder", "burn/wgpu"]
+decoder-lora = ["decoder", "model-session"]
 
 # esp::embed
 # Save/load a VectorIndex through eidetic's typed-payload API.
 persistence = ["dep:eidetic"]
+model-session = ["persistence", "dep:serde_json"]
 index-burn = ["dep:burn", "dep:getrandom"]
 index-burn-wgpu = ["index-burn", "burn/wgpu"]
 bert = ["dep:burn", "dep:tokenizers", "dep:safetensors", "dep:serde_json", "dep:half", "dep:getrandom"]

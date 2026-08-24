@@ -23,11 +23,18 @@ pub mod actor;
 #[cfg(feature = "decoder")]
 pub mod decoder;
 pub mod provider;
+#[cfg(feature = "model-session")]
+pub mod session;
 pub mod stub;
 
 #[cfg(feature = "actor")]
 pub use actor::{InferCommand, InferUpdate, spawn_inference_actor};
 pub use provider::{
     CapabilityQuery, GenerationRequest, InferError, InferenceProvider, ModelCapability,
+};
+#[cfg(feature = "model-session")]
+pub use session::{
+    AdapterArtifact, AdapterLoader, AdapterSelection, BoundModelSession, ModelSession,
+    ModelSessionError, PreparedGenerationRequest,
 };
 pub use stub::StubInferenceProvider;
