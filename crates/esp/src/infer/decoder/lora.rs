@@ -210,6 +210,7 @@ pub struct PeftLoraAdapterLoader<'a> {
 
 impl<'a> PeftLoraAdapterLoader<'a> {
     /// Construct a loader over immutable base artifacts and a host-selected device.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         base_model_ref: eidetic::ManifestId,
         tokenizer_ref: eidetic::ManifestId,

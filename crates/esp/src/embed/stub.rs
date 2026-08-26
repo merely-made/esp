@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn long_input_does_not_panic() {
         let p = StubEmbeddingProvider::new(16).unwrap();
-        let long: String = std::iter::repeat('x').take(10_000).collect();
+        let long: String = "x".repeat(10_000);
         let v = p.embed_one(&long).unwrap();
         assert_eq!(v.len(), 16);
     }
