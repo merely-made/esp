@@ -46,6 +46,7 @@ pub struct DecoderLayer {
 }
 
 /// The pre-loaded tensors for one layer, in Burn `[in, out]` convention.
+#[derive(Clone)]
 pub struct LoadedDecoderLayer {
     pub input_norm_gamma: Tensor<1>,
     pub q_w: Tensor<2>,

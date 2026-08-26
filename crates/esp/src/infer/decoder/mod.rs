@@ -28,6 +28,8 @@ pub mod model;
 pub mod provider;
 pub mod sample;
 pub mod tensors;
+#[cfg(feature = "decoder-lora")]
+pub mod train;
 
 pub use attention::{DecoderAttention, LayerKvCache, LlamaRotaryEncoding};
 pub use config::DecoderConfig;
@@ -45,6 +47,15 @@ use burn::tensor::Device;
 pub use lora::{PEFT_LORA_NDARRAY_LOADER, PeftLoraAdapterLoader};
 pub use provider::{DecoderGeneration, DecoderProvider};
 pub use sample::Sampler;
+#[cfg(feature = "decoder-lora")]
+pub use train::{
+    LoraTrainerSettings, TRAINED_ADAPTER_FORMAT_VERSION, TRAINED_PEFT_VERSION, TrainedLoraAdapter,
+    TrainingCase, expected_token_rank, ranking_tally, train_peft_lora,
+};
+
+/// The device vocabulary hosts select from, re-exported so a composition
+/// layer never names `burn` itself.
+pub use burn::tensor::Device as DecoderDevice;
 
 /// The decoder on the wgpu backend — the concrete inference lane hosts use
 /// so they never name `burn` themselves.

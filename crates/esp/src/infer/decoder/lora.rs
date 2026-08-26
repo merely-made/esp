@@ -58,7 +58,10 @@ fn tensor<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>
         .map_err(|_| InferError::InvalidWeights(format!("missing adapter tensor: {name}")))
 }
 
-fn dimensions(config: &DecoderConfig, module: &str) -> Result<(usize, usize), InferError> {
+pub(crate) fn dimensions(
+    config: &DecoderConfig,
+    module: &str,
+) -> Result<(usize, usize), InferError> {
     let h = config.hidden_size;
     let kv = config.kv_heads() * config.head_dim();
     match module {
@@ -70,7 +73,7 @@ fn dimensions(config: &DecoderConfig, module: &str) -> Result<(usize, usize), In
     }
 }
 
-fn add_delta(base: Tensor<2>, a: Tensor<2>, b: Tensor<2>, scale: f32) -> Tensor<2> {
+pub(crate) fn add_delta(base: Tensor<2>, a: Tensor<2>, b: Tensor<2>, scale: f32) -> Tensor<2> {
     // PEFT stores A [rank, in] and B [out, rank]. Burn linears store
     // [in, out], so the resident delta is A^T @ B^T.
     base + a.transpose().matmul(b.transpose()).mul_scalar(scale)

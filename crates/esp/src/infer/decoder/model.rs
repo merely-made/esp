@@ -24,6 +24,7 @@ pub(crate) fn embedding_from_loaded(weight: Tensor<2>, device: &Device) -> Embed
 
 /// All pre-loaded tensors for a decoder, in Burn conventions
 /// (`[in, out]` linears; `[vocab, hidden]` embedding).
+#[derive(Clone)]
 pub struct LoadedDecoder {
     pub embed_w: Tensor<2>,
     pub layers: Vec<LoadedDecoderLayer>,
