@@ -1,3 +1,9 @@
+// Copyright 2026 Mark Alan Boykin
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// SPDX-License-Identifier: MPL-2.0
+
 //! Real-checkpoint validation for the decoder (inference plan P1's
 //! payoff receipts). All `#[ignore]`d — they need `VATES_TINYLLAMA_DIR`
 //! pointing at a directory with TinyLlama-1.1B-Chat-v1.0's `config.json`

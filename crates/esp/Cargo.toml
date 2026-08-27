@@ -2,7 +2,7 @@
 name = "esp"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license.workspace = true
 description = "Portable inference and embedding seams for local, browser, and remote model execution."
 repository = "https://github.com/merely-made/mere"
 readme = "README.md"
