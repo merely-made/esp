@@ -5,4 +5,7 @@
 # The wasm32-wasip2 target is for the document-core guest crates (built per-crate).
 [toolchain]
 channel = "1.97.1"
-targets = ["wasm32-wasip2"]
+# wasm32-unknown-unknown carries the browser half of the WebRTC carrier
+# (crates/murm/webrtc-carrier); its C0 receipt is a dual-target build, which
+# only reproduces on a fresh clone if the target is declared here.
+targets = ["wasm32-wasip2", "wasm32-unknown-unknown"]
