@@ -1,7 +1,10 @@
 # esp
 
-ESP is Mere's portable model-execution boundary. It contains two deliberately
-separate namespaces:
+ESP is Mere's portable model-execution boundary — the inference engine's
+execution lane in the ruled consolidation map (mere
+`design_docs/mere_docs/implementation_strategy/2026-08-22_conatus_engine_plan.md`);
+the semantic *realm* is the corpora esp executes models against, not esp
+itself. It contains two deliberately separate namespaces:
 
 - `esp::infer`: generation providers, capability matching, streaming, the
   Armillary actor, and the Burn llama-family decoder.
