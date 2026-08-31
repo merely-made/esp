@@ -182,7 +182,7 @@ fn save_cases(store: &mut MemoryBackend, prefixes: &[&str]) -> Vec<ManifestId> {
                 TrustEnvelope::self_asserted(),
                 Timestamp(0),
             ))
-            .expect("save case engram")
+            .expect("save case codicil")
         })
         .collect();
     ids.sort_by_key(ToString::to_string);
@@ -193,8 +193,8 @@ fn load_cases(store: &mut MemoryBackend, ids: &[ManifestId]) -> Vec<TrainingCase
     ids.iter()
         .map(|id| {
             let blob = pollster::block_on(load_typed::<OpaqueBlob>(store, &mut NoFetcher, *id))
-                .expect("load case engram")
-                .expect("case engram present");
+                .expect("load case codicil")
+                .expect("case codicil present");
             serde_json::from_slice(&blob.0).expect("case JSON")
         })
         .collect()
