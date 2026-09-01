@@ -45,7 +45,10 @@ serde_json = "1"
 pollster = "0.4"
 async-trait = "0.1"
 eidetic = { package = "mere-eidetic", path = "../../eidetic/eidetic-core", version = "0.0.2" }
+eidetic-search = { workspace = true }
 muniment = { path = "../../eidetic/muniment", version = "0.1.1" }
+sha2 = { workspace = true }
+tempfile = "3"
 
 [features]
 default = []
