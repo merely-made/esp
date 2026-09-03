@@ -15,6 +15,15 @@ The default build keeps both contracts dependency-light. Model execution is
 selected explicitly through features; ESP does not own model artifacts, agent
 identity, job authorization, transport, or global device policy.
 
+`LexicalEmbeddingProvider::new(dimensions)` keeps the original unigram vector
+space. Phrase-sensitive callers can opt into explicit token n-gram orders with
+`LexicalEmbeddingProvider::with_token_ngram_orders(dimensions, [1, 2])`.
+Changing the orders changes the vector space, so callers must re-mint any
+derived `VectorIndex` under the same setting. The fixed-corpus receipt and cost
+numbers, including the real BM25/RRF integration probe and digest-pinned
+MiniLM CPU baseline, live in the
+[search surface wiring plan](../../../design_docs/mere_docs/implementation_strategy/2026-08-12_search_surface_wiring_plan.md).
+
 ## Features
 
 | Namespace | CPU | WGPU | Other |

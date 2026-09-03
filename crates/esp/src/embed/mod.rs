@@ -58,7 +58,7 @@ pub use bert::{
 pub use index::{IndexError, VectorIndex};
 #[cfg(feature = "index-burn")]
 pub use index_burn::cosine_top_k;
-pub use lexical::LexicalEmbeddingProvider;
+pub use lexical::{DEFAULT_TOKEN_NGRAM_ORDERS, LexicalEmbeddingProvider};
 #[cfg(feature = "persistence")]
 pub use persistence::{
     VECTOR_INDEX_SCHEMA_REF, list_from_eidetic, load_from_eidetic, save_to_eidetic,
