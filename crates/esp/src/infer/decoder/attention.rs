@@ -130,11 +130,34 @@ impl LayerKvCache {
 }
 
 /// Build a bias-free `Linear` from a pre-loaded `[in, out]` weight.
+///
+/// The weight is adopted as-is with [`adopt_param`], never re-marked a
+/// tracked leaf; see that function for why.
 pub(crate) fn linear_no_bias_from_loaded(weight: Tensor<2>, device: &Device) -> Linear {
     let [d_in, d_out] = weight.dims();
     let mut linear = LinearConfig::new(d_in, d_out).with_bias(false).init(device);
-    linear.weight = burn::module::Param::from_tensor(weight);
+    linear.weight = adopt_param(weight);
     linear
+}
+
+/// Wrap an already-materialized tensor as a module parameter **without**
+/// asserting that it is a tracked autodiff leaf.
+///
+/// `Param::from_tensor` calls `require_grad()`, and burn's autodiff panics
+/// (`Can't convert a non leaf tensor into a tracked tensor`) when that lands
+/// on a tensor that is already the result of an operation. The v1 LoRA
+/// trainer builds its decoder from composed weights — `base + A^T B^T` — so
+/// every projection it hands here is exactly such a non-leaf. Adopting the
+/// tensor unchanged keeps that graph edge intact, which is what lets the loss
+/// backpropagate into the factors.
+///
+/// Nothing in ESP optimizes a `DecoderModel` in place: the base weights are
+/// inference-only and the trainer owns its factors as separate parameters.
+/// The gradient requirement of these tensors is therefore whatever the caller
+/// built them with, which is the honest answer, and on a non-autodiff device
+/// (every inference path) the distinction does not exist at all.
+pub(crate) fn adopt_param<const D: usize>(value: Tensor<D>) -> burn::module::Param<Tensor<D>> {
+    burn::module::Param::initialized(burn::module::ParamId::new(), value)
 }
 
 /// One attention block of the decoder.

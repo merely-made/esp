@@ -15,18 +15,19 @@
 //! `mlp.gate_proj` → SwiGlu inner (the silu side), `mlp.up_proj` → SwiGlu
 //! outer, `mlp.down_proj` → `down`.
 
-use burn::module::Param;
 use burn::nn::{Linear, RmsNorm, RmsNormConfig, SwiGlu, SwiGluConfig};
 use burn::tensor::{Device, Tensor};
 
-use super::attention::{DecoderAttention, LlamaRotaryEncoding, linear_no_bias_from_loaded};
+use super::attention::{
+    DecoderAttention, LlamaRotaryEncoding, adopt_param, linear_no_bias_from_loaded,
+};
 use super::config::DecoderConfig;
 
 /// Build an `RmsNorm` whose gamma is the supplied tensor.
 pub(crate) fn rms_norm_from_loaded(gamma: Tensor<1>, epsilon: f64, device: &Device) -> RmsNorm {
     let [size] = gamma.dims();
     let mut norm = RmsNormConfig::new(size).with_epsilon(epsilon).init(device);
-    norm.gamma = Param::from_tensor(gamma);
+    norm.gamma = adopt_param(gamma);
     norm
 }
 

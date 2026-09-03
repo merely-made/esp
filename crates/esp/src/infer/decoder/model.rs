@@ -11,11 +11,10 @@
 //! the embedding matrix, transposed, as the LM head — checkpoints in
 //! that class omit `lm_head.weight` entirely.
 
-use burn::module::Param;
 use burn::nn::{Embedding, EmbeddingConfig, Linear, RmsNorm};
 use burn::tensor::{Device, Int, Tensor};
 
-use super::attention::{LlamaRotaryEncoding, linear_no_bias_from_loaded};
+use super::attention::{LlamaRotaryEncoding, adopt_param, linear_no_bias_from_loaded};
 use super::config::DecoderConfig;
 use super::layer::{DecoderLayer, LoadedDecoderLayer, rms_norm_from_loaded};
 
@@ -24,7 +23,7 @@ use super::layer::{DecoderLayer, LoadedDecoderLayer, rms_norm_from_loaded};
 pub(crate) fn embedding_from_loaded(weight: Tensor<2>, device: &Device) -> Embedding {
     let [vocab, hidden] = weight.dims();
     let mut embedding = EmbeddingConfig::new(vocab, hidden).init(device);
-    embedding.weight = Param::from_tensor(weight);
+    embedding.weight = adopt_param(weight);
     embedding
 }
 

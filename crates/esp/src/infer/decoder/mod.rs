@@ -38,6 +38,8 @@ pub mod sample;
 pub mod tensors;
 #[cfg(feature = "decoder-lora")]
 pub mod train;
+#[cfg(feature = "decoder-autodiff")]
+pub mod train_autodiff;
 
 pub use attention::{DecoderAttention, LayerKvCache, LlamaRotaryEncoding};
 pub use config::DecoderConfig;
@@ -61,6 +63,11 @@ pub use sample::Sampler;
 pub use train::{
     LoraTrainerSettings, TRAINED_ADAPTER_FORMAT_VERSION, TRAINED_PEFT_VERSION, TrainedLoraAdapter,
     TrainingCase, expected_token_rank, ranking_tally, train_peft_lora,
+};
+#[cfg(feature = "decoder-autodiff")]
+pub use train_autodiff::{
+    AutodiffLoraSettings, TRAINED_ADAPTER_FORMAT_VERSION_AUTODIFF, TRAINED_PEFT_VERSION_AUTODIFF,
+    train_peft_lora_autodiff,
 };
 
 /// The device vocabulary hosts select from, re-exported so a composition

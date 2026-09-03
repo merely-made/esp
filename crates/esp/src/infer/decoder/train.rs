@@ -113,25 +113,29 @@ pub struct TrainedLoraAdapter {
 
 /// Deterministic non-zero start for the A factors; B starts at zero so the
 /// step-zero model is exactly the base model.
-fn det_init(n: usize, salt: usize) -> Vec<f32> {
+pub(crate) fn det_init(n: usize, salt: usize) -> Vec<f32> {
     (0..n)
         .map(|i| (((i + salt * 7919) as f32) * 0.618_034).sin() * 0.1)
         .collect()
 }
 
-struct Objective<'a> {
-    config: &'a DecoderConfig,
-    base: &'a LoadedDecoder,
-    target_module: &'a str,
-    rank: usize,
-    in_features: usize,
-    out_features: usize,
-    scale: f32,
-    batch_ids: Vec<i32>,
-    batch: usize,
-    seq: usize,
-    expected_id: usize,
-    device: Device,
+/// The v0 loss: one flat parameter vector in, one scalar out, through the
+/// real decoder forward. `pub(crate)` because the v1 gradient check reads its
+/// central differences against exactly this function — the comparison is only
+/// worth anything if both trainers agree on what the loss *is*.
+pub(crate) struct Objective<'a> {
+    pub(crate) config: &'a DecoderConfig,
+    pub(crate) base: &'a LoadedDecoder,
+    pub(crate) target_module: &'a str,
+    pub(crate) rank: usize,
+    pub(crate) in_features: usize,
+    pub(crate) out_features: usize,
+    pub(crate) scale: f32,
+    pub(crate) batch_ids: Vec<i32>,
+    pub(crate) batch: usize,
+    pub(crate) seq: usize,
+    pub(crate) expected_id: usize,
+    pub(crate) device: Device,
 }
 
 impl Objective<'_> {
@@ -158,7 +162,7 @@ impl Objective<'_> {
 
     /// Mean next-token cross-entropy of the expected token, through the real
     /// decoder forward with the loader's own delta composition.
-    fn loss(&self, params: &[f32]) -> f64 {
+    pub(crate) fn loss(&self, params: &[f32]) -> f64 {
         let mut loaded = self.base.clone();
         for (layer, entry) in loaded.layers.iter_mut().enumerate() {
             let (a, b) = self.factors(params, layer);
@@ -317,21 +321,22 @@ pub fn train_peft_lora(
         }
     }
 
+    let target_modules = [settings.target_module.clone()];
     Ok(TrainedLoraAdapter {
-        adapter_safetensors: serialize_adapter(
-            &config,
-            settings,
-            &params,
-            in_features,
-            out_features,
+        adapter_safetensors: serialize_adapter_modules(&config, rank, &target_modules, &params),
+        adapter_config_json: adapter_config_json_for(
+            model_id,
+            TRAINED_PEFT_VERSION,
+            settings.rank,
+            settings.alpha,
+            &target_modules,
         ),
-        adapter_config_json: adapter_config_json(model_id, settings),
         initial_loss,
         trained_loss: current_loss,
     })
 }
 
-fn expected_id(tokenizer: &Tokenizer, token: &str) -> Result<usize, InferError> {
+pub(crate) fn expected_id(tokenizer: &Tokenizer, token: &str) -> Result<usize, InferError> {
     tokenizer
         .token_to_id(token)
         .map(|id| id as usize)
@@ -340,39 +345,48 @@ fn expected_id(tokenizer: &Tokenizer, token: &str) -> Result<usize, InferError> 
         })
 }
 
-fn serialize_adapter(
+/// The one adapter serializer both trainers publish through.
+///
+/// `params` is the flat factor vector in **layer-major, then target-module
+/// order**, each `(layer, module)` slot holding A `[rank, in]` immediately
+/// followed by B `[out, rank]` — the same order the tensors are emitted in,
+/// so a reader can walk names and values together. Dtype is F32
+/// little-endian and the names are PEFT's, because that pair is the byte
+/// contract `lora.rs::apply_peft_lora` reads; the trainer version changes the
+/// values in these tensors and nothing else about them.
+pub(crate) fn serialize_adapter_modules(
     config: &DecoderConfig,
-    settings: &LoraTrainerSettings,
+    rank: usize,
+    target_modules: &[String],
     params: &[f32],
-    in_features: usize,
-    out_features: usize,
 ) -> Vec<u8> {
-    let rank = usize::from(settings.rank);
-    let per_layer = rank * (in_features + out_features);
     let mut buffers: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
+    let mut offset = 0usize;
     for layer in 0..config.num_hidden_layers {
-        let prefix = format!(
-            "base_model.model.model.layers.{layer}.self_attn.{}",
-            settings.target_module
-        );
-        let offset = layer * per_layer;
-        let a_len = rank * in_features;
-        buffers.push((
-            format!("{prefix}.lora_A.weight"),
-            vec![rank, in_features],
-            params[offset..offset + a_len]
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect(),
-        ));
-        buffers.push((
-            format!("{prefix}.lora_B.weight"),
-            vec![out_features, rank],
-            params[offset + a_len..offset + per_layer]
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect(),
-        ));
+        for module in target_modules {
+            let (in_features, out_features) =
+                dimensions(config, module).expect("target modules were validated");
+            let prefix = format!("base_model.model.model.layers.{layer}.self_attn.{module}");
+            let a_len = rank * in_features;
+            let b_len = out_features * rank;
+            buffers.push((
+                format!("{prefix}.lora_A.weight"),
+                vec![rank, in_features],
+                params[offset..offset + a_len]
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            ));
+            buffers.push((
+                format!("{prefix}.lora_B.weight"),
+                vec![out_features, rank],
+                params[offset + a_len..offset + a_len + b_len]
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            ));
+            offset += a_len + b_len;
+        }
     }
     let views: Vec<(&str, TensorView<'_>)> = buffers
         .iter()
@@ -387,14 +401,26 @@ fn serialize_adapter(
     safetensors::serialize(views, &None).expect("trained adapter serializes")
 }
 
-fn adapter_config_json(model_id: &str, settings: &LoraTrainerSettings) -> Vec<u8> {
+/// The one `adapter_config.json` writer both trainers publish through.
+///
+/// `peft_version` is the trainer's own stamp; the loader requires the
+/// manifest's `adapter_format_version` to be exactly `peft-{peft_version}`,
+/// which is what keeps a v0 and a v1 adapter from being mistaken for each
+/// other in a FLoRA round.
+pub(crate) fn adapter_config_json_for(
+    model_id: &str,
+    peft_version: &str,
+    rank: u16,
+    alpha: f32,
+    target_modules: &[String],
+) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "base_model_name_or_path": model_id,
         "peft_type": "LORA",
-        "peft_version": TRAINED_PEFT_VERSION,
-        "r": settings.rank,
-        "lora_alpha": settings.alpha,
-        "target_modules": [settings.target_module],
+        "peft_version": peft_version,
+        "r": rank,
+        "lora_alpha": alpha,
+        "target_modules": target_modules,
         "bias": "none",
     }))
     .expect("adapter config serializes")
@@ -440,6 +466,7 @@ pub fn ranking_tally(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::tiny_config;
     use super::*;
 
     fn settings() -> LoraTrainerSettings {
@@ -479,6 +506,111 @@ mod tests {
             mutate(&mut broken);
             let error = broken.validate().unwrap_err().to_string();
             assert!(error.contains(needle), "{error} should mention {needle}");
+        }
+    }
+
+    /// The v0 serializer exactly as it stood before the shared
+    /// [`serialize_adapter_modules`] existed. Kept verbatim in the test so
+    /// the generalization can be proven byte-for-byte innocent rather than
+    /// argued to be.
+    fn serialize_adapter_v0_original(
+        config: &DecoderConfig,
+        settings: &LoraTrainerSettings,
+        params: &[f32],
+        in_features: usize,
+        out_features: usize,
+    ) -> Vec<u8> {
+        let rank = usize::from(settings.rank);
+        let per_layer = rank * (in_features + out_features);
+        let mut buffers: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
+        for layer in 0..config.num_hidden_layers {
+            let prefix = format!(
+                "base_model.model.model.layers.{layer}.self_attn.{}",
+                settings.target_module
+            );
+            let offset = layer * per_layer;
+            let a_len = rank * in_features;
+            buffers.push((
+                format!("{prefix}.lora_A.weight"),
+                vec![rank, in_features],
+                params[offset..offset + a_len]
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            ));
+            buffers.push((
+                format!("{prefix}.lora_B.weight"),
+                vec![out_features, rank],
+                params[offset + a_len..offset + per_layer]
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            ));
+        }
+        let views: Vec<(&str, TensorView<'_>)> = buffers
+            .iter()
+            .map(|(name, shape, bytes)| {
+                (
+                    name.as_str(),
+                    TensorView::new(Dtype::F32, shape.clone(), bytes).unwrap(),
+                )
+            })
+            .collect();
+        safetensors::serialize(views, &None).unwrap()
+    }
+
+    /// The v0 `adapter_config.json` writer as it stood before the shared
+    /// [`adapter_config_json_for`] existed.
+    fn adapter_config_json_v0_original(model_id: &str, settings: &LoraTrainerSettings) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "base_model_name_or_path": model_id,
+            "peft_type": "LORA",
+            "peft_version": TRAINED_PEFT_VERSION,
+            "r": settings.rank,
+            "lora_alpha": settings.alpha,
+            "target_modules": [settings.target_module],
+            "bias": "none",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn shared_serializer_reproduces_v0_bytes_for_one_module() {
+        let config = tiny_config();
+        for module in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+            for rank in [1usize, 3] {
+                let mut settings = settings();
+                settings.rank = rank as u16;
+                settings.target_module = module.into();
+                let (in_features, out_features) = dimensions(&config, module).unwrap();
+                let count = config.num_hidden_layers * rank * (in_features + out_features);
+                let params: Vec<f32> = (0..count)
+                    .map(|i| (i as f32 * 0.37).sin() * 0.25 - 0.011 * i as f32)
+                    .collect();
+                let modules = [settings.target_module.clone()];
+                assert_eq!(
+                    serialize_adapter_modules(&config, rank, &modules, &params),
+                    serialize_adapter_v0_original(
+                        &config,
+                        &settings,
+                        &params,
+                        in_features,
+                        out_features
+                    ),
+                    "shared serializer changed v0's bytes for {module} rank {rank}"
+                );
+                assert_eq!(
+                    adapter_config_json_for(
+                        "fixture/model",
+                        TRAINED_PEFT_VERSION,
+                        settings.rank,
+                        settings.alpha,
+                        &modules,
+                    ),
+                    adapter_config_json_v0_original("fixture/model", &settings),
+                    "shared adapter config changed v0's bytes for {module} rank {rank}"
+                );
+            }
         }
     }
 

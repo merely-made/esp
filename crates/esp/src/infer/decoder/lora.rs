@@ -64,6 +64,17 @@ fn tensor<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>
         .map_err(|_| InferError::InvalidWeights(format!("missing adapter tensor: {name}")))
 }
 
+/// The name-only half of [`dimensions`]: is this a llama attention
+/// projection the loader will accept?
+///
+/// Trainer settings are validated before any `config.json` is parsed, so the
+/// name check has to stand without the shapes. The two are bound together by
+/// `dimensions_and_names_agree` below; neither may grow an arm alone.
+#[cfg(any(test, feature = "decoder-autodiff"))]
+pub(crate) fn supported_target_module(module: &str) -> bool {
+    matches!(module, "q_proj" | "k_proj" | "v_proj" | "o_proj")
+}
+
 pub(crate) fn dimensions(
     config: &DecoderConfig,
     module: &str,
@@ -336,6 +347,27 @@ mod tests {
             })
             .collect();
         safetensors::serialize(views, &None).unwrap()
+    }
+
+    #[test]
+    fn dimensions_and_names_agree() {
+        let config = tiny_config();
+        for module in [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "lm_head",
+            "",
+            "Q_PROJ",
+        ] {
+            assert_eq!(
+                supported_target_module(module),
+                dimensions(&config, module).is_ok(),
+                "the name-only check and dimensions() disagree about {module:?}"
+            );
+        }
     }
 
     #[test]
