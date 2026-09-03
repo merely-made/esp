@@ -182,7 +182,7 @@ fn save_cases(store: &mut MemoryBackend, prefixes: &[&str]) -> Vec<ManifestId> {
                 TrustEnvelope::self_asserted(),
                 Timestamp(0),
             ))
-            .expect("save case engram")
+            .expect("save case codicil")
         })
         .collect();
     ids.sort_by_key(ToString::to_string);
@@ -193,8 +193,8 @@ fn load_cases(store: &mut MemoryBackend, ids: &[ManifestId]) -> Vec<TrainingCase
     ids.iter()
         .map(|id| {
             let blob = pollster::block_on(load_typed::<OpaqueBlob>(store, &mut NoFetcher, *id))
-                .expect("load case engram")
-                .expect("case engram present");
+                .expect("load case codicil")
+                .expect("case codicil present");
             serde_json::from_slice(&blob.0).expect("case JSON")
         })
         .collect()
@@ -237,8 +237,8 @@ fn adapter_trained_from_corpus_beats_baseline_on_held_out_ranking() {
 
     // 2. Canonical corpus: disjoint, strictly ordered source partitions.
     let corpus = TrainingCorpus {
-        training_source_engrams: save_cases(&mut store, &TRAIN_PREFIXES),
-        evaluation_source_engrams: save_cases(&mut store, &EVAL_PREFIXES),
+        training_source_codicils: save_cases(&mut store, &TRAIN_PREFIXES),
+        evaluation_source_codicils: save_cases(&mut store, &EVAL_PREFIXES),
     };
     corpus.validate().expect("corpus valid");
     let corpus_ref = pollster::block_on(save_typed(
@@ -254,7 +254,7 @@ fn adapter_trained_from_corpus_beats_baseline_on_held_out_ranking() {
 
     // 3. The shared deterministic trainer over the training partition only.
     let settings = trainer_settings();
-    let train_cases = load_cases(&mut store, &corpus.training_source_engrams);
+    let train_cases = load_cases(&mut store, &corpus.training_source_codicils);
     let trained = train_peft_lora(
         &resolved.components.config_bytes,
         &resolved.components.tokenizer_bytes,
@@ -314,7 +314,7 @@ fn adapter_trained_from_corpus_beats_baseline_on_held_out_ranking() {
             "inputs": {
                 "base_model_ref": base_model_ref.to_string(),
                 "tokenizer_ref": tokenizer_ref.to_string(),
-                "corpus_partition": "training_source_engrams",
+                "corpus_partition": "training_source_codicils",
             },
             "outputs": ["adapter_blob", "adapter_config_blob", "eval_report"],
         }),
@@ -388,7 +388,7 @@ fn adapter_trained_from_corpus_beats_baseline_on_held_out_ranking() {
     };
     let adapted_session = adapted();
 
-    let eval_cases = load_cases(&mut store, &corpus.evaluation_source_engrams);
+    let eval_cases = load_cases(&mut store, &corpus.evaluation_source_codicils);
     let expected_id = 7usize;
     for (label, session) in [
         ("baseline", &baseline_session),

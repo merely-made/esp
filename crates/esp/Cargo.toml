@@ -28,6 +28,15 @@ serde_json = { version = "1.0", optional = true }
 safetensors = { version = "0.4", optional = true }
 half = { version = "2", optional = true }
 
+# The adapter probe behind `decoder-wgpu` (`infer::decoder::gpu_probe`). This
+# is the SAME wgpu the burn stack reaches through cubecl-wgpu — the workspace
+# carries exactly one, 30.0.1 — which is what makes the probe's answer an
+# answer about the adapter cubecl would really bind rather than about a
+# parallel enumeration. `pollster` because `Instance::enumerate_adapters` is a
+# future that is already resolved on native, and cubecl blocks on it too.
+wgpu = { workspace = true, optional = true }
+pollster = { version = "0.4", optional = true }
+
 # Tokenizers uses native Oniguruma on native targets and the pure-Rust regex
 # path on wasm. The dependency name is shared so `dep:tokenizers` activates the
 # appropriate target realization.
@@ -56,7 +65,7 @@ default = []
 # esp::infer
 actor = ["dep:armillary"]
 decoder = ["dep:burn", "dep:serde_json", "dep:safetensors", "dep:half", "dep:tokenizers", "dep:tracing", "dep:getrandom"]
-decoder-wgpu = ["decoder", "burn/wgpu"]
+decoder-wgpu = ["decoder", "burn/wgpu", "dep:wgpu", "dep:pollster"]
 decoder-lora = ["decoder", "model-session"]
 
 # esp::embed
