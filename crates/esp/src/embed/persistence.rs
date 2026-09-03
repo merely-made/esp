@@ -33,13 +33,13 @@ use serde::de::DeserializeOwned;
 
 use super::VectorIndex;
 
-/// Canonical bytes of the `VectorIndex` schema engram payload.
+/// Canonical bytes of the `VectorIndex` schema codicil payload.
 ///
 /// Mere-native schema declaring the persisted vector-index shape. Stable
 /// across instances; its BLAKE3 hash is [`VECTOR_INDEX_SCHEMA_REF`].
 const VECTOR_INDEX_SCHEMA_PAYLOAD: &[u8] = br#"{"format":"mere-native","schema_id":"embed.VectorIndex/v1","body":{"version":1,"description":"Persisted vector index over embeddings: dimensions, metric, and key->vector entries.","required":["dimensions","metric","entries"],"fields":{"dimensions":{"type":"u64"},"metric":{"type":"string"},"entries":{"type":"object"}}}}"#;
 
-/// Schema reference for `VectorIndex` engrams.
+/// Schema reference for `VectorIndex` codicils.
 ///
 /// Computed lazily from [`VECTOR_INDEX_SCHEMA_PAYLOAD`] at first use.
 pub fn vector_index_schema_ref() -> SchemaRef {
@@ -50,7 +50,7 @@ pub fn vector_index_schema_ref() -> SchemaRef {
 
 /// The well-known schema reference for persisted vector indices.
 ///
-/// All `VectorIndex<K>` engrams use this schema regardless of `K` — the
+/// All `VectorIndex<K>` codicils use this schema regardless of `K` — the
 /// key type is data-level (varies per use case), not schema-level.
 pub static VECTOR_INDEX_SCHEMA_REF: std::sync::LazyLock<SchemaRef> =
     std::sync::LazyLock::new(vector_index_schema_ref);
@@ -78,7 +78,7 @@ where
 }
 
 /// Save a vector index through Layer 3, returning the manifest id of the
-/// produced engram. Callers that need to recover the index later persist
+/// produced codicil. Callers that need to recover the index later persist
 /// the returned id (typically alongside the graph view it indexes).
 pub async fn save_to_eidetic<K>(
     store: &mut dyn eidetic::Store,
