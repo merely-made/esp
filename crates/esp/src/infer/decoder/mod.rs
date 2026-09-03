@@ -40,6 +40,8 @@ pub mod tensors;
 pub mod train;
 #[cfg(feature = "decoder-autodiff")]
 pub mod train_autodiff;
+#[cfg(feature = "decoder-lora")]
+pub mod train_autodiff_settings;
 
 pub use attention::{DecoderAttention, LayerKvCache, LlamaRotaryEncoding};
 pub use config::DecoderConfig;
@@ -64,10 +66,14 @@ pub use train::{
     LoraTrainerSettings, TRAINED_ADAPTER_FORMAT_VERSION, TRAINED_PEFT_VERSION, TrainedLoraAdapter,
     TrainingCase, expected_token_rank, ranking_tally, train_peft_lora,
 };
+// The v1 vocabulary rides with the loader, not with the trainer: a consumer
+// must be able to name a v1 adapter's version and settings on a build that
+// will never train one. Only the function is behind `decoder-autodiff`.
 #[cfg(feature = "decoder-autodiff")]
-pub use train_autodiff::{
+pub use train_autodiff::train_peft_lora_autodiff;
+#[cfg(feature = "decoder-lora")]
+pub use train_autodiff_settings::{
     AutodiffLoraSettings, TRAINED_ADAPTER_FORMAT_VERSION_AUTODIFF, TRAINED_PEFT_VERSION_AUTODIFF,
-    train_peft_lora_autodiff,
 };
 
 /// The device vocabulary hosts select from, re-exported so a composition

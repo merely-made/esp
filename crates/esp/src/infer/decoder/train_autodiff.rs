@@ -32,128 +32,28 @@
 //! still tokenize to one shared length, exactly as in v0; a per-case target
 //! is merely a gather, but a per-case length is a masked objective and is the
 //! named follow-on.
+//!
+//! The trainer's *vocabulary* — [`AutodiffLoraSettings`] and the two version
+//! strings — lives next door in [`super::train_autodiff_settings`], under
+//! `decoder-lora` rather than `decoder-autodiff`. Only this module, which
+//! needs burn's autodiff and optimizer, is behind the heavier feature.
 
 use burn::module::{Module, Param};
 use burn::optim::{AdamConfig, GradientsParams, decay::WeightDecayConfig};
 use burn::tensor::activation::log_softmax;
 use burn::tensor::{Device, Int, Tensor, TensorData};
-use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
 use super::config::DecoderConfig;
 use super::loader::load_decoder_tensors_from_bytes;
-use super::lora::{add_delta, dimensions, supported_target_module};
+use super::lora::{add_delta, dimensions};
 use super::model::{DecoderModel, LoadedDecoder};
 use super::train::{
     TrainedLoraAdapter, TrainingCase, adapter_config_json_for, det_init, expected_id,
     serialize_adapter_modules,
 };
+use super::train_autodiff_settings::{AutodiffLoraSettings, TRAINED_PEFT_VERSION_AUTODIFF};
 use crate::infer::provider::InferError;
-
-/// PEFT version stamped into every `adapter_config.json` this trainer emits.
-///
-/// Deliberately distinct from v0's: `flora.rs` refuses to stack contributions
-/// whose trainer version differs from the round's first, so a round is
-/// homogeneous by construction and a v1 adapter can never be silently mixed
-/// with a v0 one.
-pub const TRAINED_PEFT_VERSION_AUTODIFF: &str = "esp-trainer-v1";
-/// The manifest `adapter_format_version` matching
-/// [`TRAINED_PEFT_VERSION_AUTODIFF`], in the form the adapter loader checks.
-pub const TRAINED_ADAPTER_FORMAT_VERSION_AUTODIFF: &str = "peft-esp-trainer-v1";
-
-/// Explicit hyperparameters for the v1 autodiff LoRA trainer.
-///
-/// There is deliberately no `Default`, v0's rule: every value is part of the
-/// trainer's identity and belongs in the published `training_method`. A
-/// hyperparameter nobody wrote down is a receipt nobody can reproduce.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AutodiffLoraSettings {
-    /// Low-rank dimension of the trained factors.
-    pub rank: u16,
-    /// LoRA alpha; the applied scale is `alpha / rank`.
-    pub alpha: f32,
-    /// The llama attention projections carrying the adapter, in the order
-    /// they are serialized. Any of `q_proj` / `k_proj` / `v_proj` / `o_proj`.
-    pub target_modules: Vec<String>,
-    /// Full-batch Adam steps.
-    pub steps: u32,
-    /// Adam learning rate.
-    pub learning_rate: f64,
-    /// Adam's first-moment decay.
-    pub beta1: f32,
-    /// Adam's second-moment decay.
-    pub beta2: f32,
-    /// Adam's numerical-stability term.
-    pub epsilon: f32,
-    /// L2 penalty folded into the gradient; `0.0` disables it entirely.
-    pub weight_decay: f32,
-}
-
-impl AutodiffLoraSettings {
-    /// Reject every hyperparameter that would make the run ambiguous, by
-    /// name, before a single byte of the model is touched.
-    pub fn validate(&self) -> Result<(), InferError> {
-        if self.rank == 0 {
-            return Err(InferError::InvalidConfig("trainer rank must be > 0".into()));
-        }
-        if !self.alpha.is_finite() || self.alpha <= 0.0 {
-            return Err(InferError::InvalidConfig(
-                "trainer alpha must be finite and > 0".into(),
-            ));
-        }
-        if self.steps == 0 {
-            return Err(InferError::InvalidConfig(
-                "trainer steps must be > 0".into(),
-            ));
-        }
-        if !self.learning_rate.is_finite() || self.learning_rate <= 0.0 {
-            return Err(InferError::InvalidConfig(
-                "trainer learning_rate must be finite and > 0".into(),
-            ));
-        }
-        for (label, value) in [("beta1", self.beta1), ("beta2", self.beta2)] {
-            if !value.is_finite() || !(0.0..1.0).contains(&value) {
-                return Err(InferError::InvalidConfig(format!(
-                    "trainer {label} must be finite and in [0, 1)"
-                )));
-            }
-        }
-        if !self.epsilon.is_finite() || self.epsilon <= 0.0 {
-            return Err(InferError::InvalidConfig(
-                "trainer epsilon must be finite and > 0".into(),
-            ));
-        }
-        if !self.weight_decay.is_finite() || self.weight_decay < 0.0 {
-            return Err(InferError::InvalidConfig(
-                "trainer weight_decay must be finite and >= 0".into(),
-            ));
-        }
-        if self.target_modules.is_empty() {
-            return Err(InferError::InvalidConfig(
-                "trainer target_modules must name at least one projection".into(),
-            ));
-        }
-        for (index, module) in self.target_modules.iter().enumerate() {
-            if !supported_target_module(module) {
-                return Err(InferError::InvalidConfig(format!(
-                    "trainer target_modules entry {module:?} is not a supported llama \
-                     attention projection; expected q_proj, k_proj, v_proj, or o_proj"
-                )));
-            }
-            if self.target_modules[..index].contains(module) {
-                return Err(InferError::InvalidConfig(format!(
-                    "trainer target_modules repeats {module:?}"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// The scale the loader will apply, `alpha / rank`.
-    fn scale(&self) -> f32 {
-        self.alpha / f32::from(self.rank)
-    }
-}
 
 /// The trainable factors of one `(layer, target module)` slot, in PEFT's
 /// storage convention: `a` is `[rank, in]` and `b` is `[out, rank]`, exactly
@@ -482,66 +382,6 @@ mod tests {
             epsilon: 1.0e-8,
             weight_decay: 0.0,
         }
-    }
-
-    #[test]
-    fn settings_reject_ambiguous_hyperparameters() {
-        for (mutate, needle) in [
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.rank = 0) as Box<dyn Fn(&mut _)>,
-                "rank",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.alpha = f32::INFINITY),
-                "alpha",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.steps = 0),
-                "steps",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.learning_rate = 0.0),
-                "learning_rate",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.beta1 = 1.0),
-                "beta1",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.beta2 = -0.1),
-                "beta2",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.epsilon = 0.0),
-                "epsilon",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.weight_decay = -1.0),
-                "weight_decay",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.target_modules.clear()),
-                "target_modules",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| s.target_modules = vec!["mlp".into()]),
-                "not a supported llama",
-            ),
-            (
-                Box::new(|s: &mut AutodiffLoraSettings| {
-                    s.target_modules = vec!["q_proj".into(), "q_proj".into()]
-                }),
-                "repeats",
-            ),
-        ] {
-            let mut broken = settings();
-            mutate(&mut broken);
-            let error = broken.validate().unwrap_err().to_string();
-            assert!(error.contains(needle), "{error} should mention {needle}");
-        }
-        settings()
-            .validate()
-            .expect("the baseline settings are valid");
     }
 
     /// Gradient check on the tiny fixture at the initial point.

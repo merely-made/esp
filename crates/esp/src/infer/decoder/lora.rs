@@ -70,7 +70,6 @@ fn tensor<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>
 /// Trainer settings are validated before any `config.json` is parsed, so the
 /// name check has to stand without the shapes. The two are bound together by
 /// `dimensions_and_names_agree` below; neither may grow an arm alone.
-#[cfg(any(test, feature = "decoder-autodiff"))]
 pub(crate) fn supported_target_module(module: &str) -> bool {
     matches!(module, "q_proj" | "k_proj" | "v_proj" | "o_proj")
 }
