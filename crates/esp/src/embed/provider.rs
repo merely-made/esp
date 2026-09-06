@@ -48,7 +48,7 @@ impl std::fmt::Display for EmbedError {
         match self {
             EmbedError::InputTooLong { length, limit } => {
                 write!(f, "input too long: {length} > {limit}")
-            }
+            },
             EmbedError::ModelNotLoaded => write!(f, "model not loaded"),
             EmbedError::Backend(msg) => write!(f, "backend: {msg}"),
             EmbedError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),

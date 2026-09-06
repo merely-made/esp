@@ -113,7 +113,7 @@ pub(crate) fn load_decoder_tensors_from_bytes(
             return Err(InferError::InvalidWeights(
                 "lm_head.weight missing but tie_word_embeddings is false".to_string(),
             ));
-        }
+        },
     };
 
     Ok(LoadedDecoder {
@@ -307,7 +307,7 @@ mod tests {
         match err {
             InferError::InvalidWeights(msg) => {
                 assert!(msg.contains("model.layers.1.mlp.up_proj.weight"), "{msg}")
-            }
+            },
             other => panic!("wrong error: {other:?}"),
         }
     }

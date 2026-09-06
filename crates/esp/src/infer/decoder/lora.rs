@@ -288,10 +288,10 @@ impl AdapterLoader for PeftLoraAdapterLoader<'_> {
             .map_err(|error| match error {
                 InferError::InvalidConfig(message) => {
                     InferError::InvalidConfig(format!("adapter {index}: {message}"))
-                }
+                },
                 InferError::InvalidWeights(message) => {
                     InferError::InvalidWeights(format!("adapter {index}: {message}"))
-                }
+                },
                 other => other,
             })?;
         }

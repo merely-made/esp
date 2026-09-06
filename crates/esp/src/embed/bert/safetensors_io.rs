@@ -51,7 +51,7 @@ pub fn extract<const D: usize>(
             return Err(LoaderError::InvalidWeights(format!(
                 "expected F32 or F16, got {dtype:?}"
             )));
-        }
+        },
     };
     if bytes.len() != elem_count * bytes_per_element {
         return Err(LoaderError::InvalidWeights(format!(

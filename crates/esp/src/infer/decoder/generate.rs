@@ -39,7 +39,7 @@ impl TokenPicker {
                     .to_vec::<f32>()
                     .expect("logits row");
                 sampler.sample(&row)
-            }
+            },
         }
     }
 
@@ -58,7 +58,7 @@ impl TokenPicker {
                     .to_vec::<f32>()
                     .map_err(|error| format!("decode logits row: {error}"))?;
                 Ok(sampler.sample(&row))
-            }
+            },
         }
     }
 }

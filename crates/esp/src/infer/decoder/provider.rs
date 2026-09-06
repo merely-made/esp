@@ -97,7 +97,7 @@ impl<'a> StreamObserver<'a> {
             Err(error) => {
                 self.decode_error = Some(error);
                 return ControlFlow::Break(());
-            }
+            },
         };
         // Hold back non-prefix decodes (mid-byte BPE boundary); the text
         // arrives with a later token.

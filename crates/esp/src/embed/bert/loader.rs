@@ -331,7 +331,7 @@ pub fn validate_weights_from_bytes(
             Err(_) => {
                 issues.push(ValidationIssue::Missing(spec.name.clone()));
                 continue;
-            }
+            },
         };
         let actual_shape: Vec<usize> = view.shape().to_vec();
         if actual_shape != spec.shape {

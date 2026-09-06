@@ -145,7 +145,7 @@ fn absorb(
         InferCommand::Generate { id, request } => pending.push_back((id, request)),
         InferCommand::Cancel { id } => {
             cancelled.insert(id);
-        }
+        },
     }
 }
 

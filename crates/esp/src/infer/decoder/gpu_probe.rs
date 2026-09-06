@@ -229,7 +229,7 @@ pub fn probe_gpu_adapter(kind: DecoderGpuKind) -> Result<GpuAdapterFacts, InferE
                 "an existing wgpu setup (device {id}) is supplied by its creator, so no \
                  adapter selection happens that this probe could report"
             )));
-        }
+        },
     };
 
     let adapters = pollster::block_on(instance.enumerate_adapters(backend.into()));

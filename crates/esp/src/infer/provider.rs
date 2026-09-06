@@ -110,7 +110,7 @@ impl std::fmt::Display for InferError {
         match self {
             InferError::PromptTooLong { length, limit } => {
                 write!(f, "prompt too long: {length} > {limit}")
-            }
+            },
             InferError::ModelNotLoaded => write!(f, "model not loaded"),
             InferError::Backend(msg) => write!(f, "backend: {msg}"),
             InferError::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
