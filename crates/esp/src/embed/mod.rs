@@ -10,7 +10,10 @@
 //! vectors, a [`SimilarityMetric`] each provider declares for its output space,
 //! and a pure-Rust retrieval core over those vectors:
 //!
-//! - [`VectorIndex`] — a flat (dense) vector index, `O(N)` per query.
+//! - [`VectorIndex`] — a flat vector index, `O(N)` per query, dense by
+//!   default; [`SparseIndex`] is the same index over [`SparseVector`], which
+//!   holds a hashed short text in ~100 bytes instead of `4 · dimensions` and
+//!   scores bit-identically.
 //! - [`SemanticSearch`] — the ingest-text / query-top-k facade over a provider
 //!   plus an index.
 //! - [`affinity_pairs`] — item-to-item similarity as `(a, b, weight)` clustering
@@ -48,6 +51,7 @@ pub mod lexical;
 pub mod persistence;
 pub mod provider;
 pub mod search;
+pub mod sparse;
 pub mod stub;
 
 pub use affinity::affinity_pairs;
@@ -55,14 +59,18 @@ pub use affinity::affinity_pairs;
 pub use bert::{
     BGE_MICRO_V2, BertConfig, BertEmbeddingProvider, MINILM_L6_V2, SNOWFLAKE_ARCTIC_EMBED_XS,
 };
-pub use index::{IndexError, VectorIndex};
+pub use index::{IndexError, IndexVector, VectorIndex};
 #[cfg(feature = "index-burn")]
 pub use index_burn::cosine_top_k;
-pub use lexical::{DEFAULT_TOKEN_NGRAM_ORDERS, LexicalEmbeddingProvider};
+pub use lexical::{
+    DEFAULT_TOKEN_NGRAM_ORDERS, HashingStats, LexicalEmbeddingProvider,
+    RECOMMENDED_DIMENSIONS_SHORT_TEXT,
+};
 #[cfg(feature = "persistence")]
 pub use persistence::{
     VECTOR_INDEX_SCHEMA_REF, list_from_eidetic, load_from_eidetic, save_to_eidetic,
 };
 pub use provider::{EmbedError, EmbeddingProvider, SimilarityMetric};
 pub use search::{SearchError, SemanticSearch};
+pub use sparse::{SparseIndex, SparseVector};
 pub use stub::StubEmbeddingProvider;

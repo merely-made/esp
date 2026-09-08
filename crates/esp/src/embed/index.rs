@@ -4,11 +4,16 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // SPDX-License-Identifier: MPL-2.0
 
-//! Flat (dense) vector index — `O(N)` per query.
+//! Flat vector index — `O(N)` per query.
 //!
 //! Suitable for graphs up to ~10k nodes; an HNSW-backed implementation will
 //! follow once scale becomes a real constraint. The flat shape keeps the
 //! crate dependency-free and trivially correct.
+//!
+//! The stored representation is a type parameter ([`IndexVector`]), defaulting
+//! to dense `Vec<f32>`. [`SparseIndex`](crate::embed::SparseIndex) is the same
+//! index over [`SparseVector`](crate::embed::SparseVector); both share this
+//! one `nearest` and one [`SimilarityMetric`] surface.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -26,21 +31,57 @@ pub enum IndexError {
     EmptyInput,
 }
 
-/// Flat vector index keyed by `K`.
+/// A representation a [`VectorIndex`] can store and score.
+///
+/// Two implementations ship: dense `Vec<f32>` (queried by `&[f32]`, the
+/// historical surface) and [`SparseVector`](crate::embed::SparseVector).
+/// Adding a third means writing this trait, not a second index.
+pub trait IndexVector {
+    /// The query form. Dense takes an unsized slice so callers keep passing
+    /// `&[f32]`, `&Vec<f32>` or `&[f32; N]` unchanged.
+    type Query: ?Sized;
+
+    /// Dimension of the space this vector lives in.
+    fn dimensions(&self) -> usize;
+
+    /// Dimension a query claims, for the index's mismatch check.
+    fn query_dimensions(query: &Self::Query) -> usize;
+
+    /// Raw metric value between a query and a stored vector.
+    fn score(metric: SimilarityMetric, query: &Self::Query, stored: &Self) -> f32;
+}
+
+impl IndexVector for Vec<f32> {
+    type Query = [f32];
+
+    fn dimensions(&self) -> usize {
+        self.len()
+    }
+
+    fn query_dimensions(query: &[f32]) -> usize {
+        query.len()
+    }
+
+    fn score(metric: SimilarityMetric, query: &[f32], stored: &Self) -> f32 {
+        score(metric, query, stored)
+    }
+}
+
+/// Flat vector index keyed by `K`, over representation `V`.
 ///
 /// Insertion overwrites any prior entry at the same key. Removal returns the
 /// previous vector if present.
 ///
-/// Serializable when `K: Serialize + Deserialize`, so a caller can persist the
-/// index through its own store.
+/// Serializable when `K` and `V` are, so a caller can persist the index
+/// through its own store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VectorIndex<K: Hash + Eq + Clone> {
+pub struct VectorIndex<K: Hash + Eq + Clone, V = Vec<f32>> {
     dimensions: usize,
     metric: SimilarityMetric,
-    entries: HashMap<K, Vec<f32>>,
+    entries: HashMap<K, V>,
 }
 
-impl<K: Hash + Eq + Clone> VectorIndex<K> {
+impl<K: Hash + Eq + Clone, V> VectorIndex<K, V> {
     pub fn new(dimensions: usize, metric: SimilarityMetric) -> Self {
         Self {
             dimensions,
@@ -65,22 +106,11 @@ impl<K: Hash + Eq + Clone> VectorIndex<K> {
         self.entries.is_empty()
     }
 
-    pub fn insert(&mut self, key: K, vector: Vec<f32>) -> Result<(), IndexError> {
-        if vector.len() != self.dimensions {
-            return Err(IndexError::DimensionMismatch {
-                expected: self.dimensions,
-                got: vector.len(),
-            });
-        }
-        self.entries.insert(key, vector);
-        Ok(())
-    }
-
-    pub fn remove(&mut self, key: &K) -> Option<Vec<f32>> {
+    pub fn remove(&mut self, key: &K) -> Option<V> {
         self.entries.remove(key)
     }
 
-    pub fn get(&self, key: &K) -> Option<&Vec<f32>> {
+    pub fn get(&self, key: &K) -> Option<&V> {
         self.entries.get(key)
     }
 
@@ -88,32 +118,8 @@ impl<K: Hash + Eq + Clone> VectorIndex<K> {
         self.entries.contains_key(key)
     }
 
-    /// Find the `k` keys whose vectors are most similar to `query`.
-    /// Returns `(key, score)` pairs sorted best-first per the index metric.
-    /// `score` is the raw metric value (cosine ∈ [-1, 1], dot product
-    /// unbounded, euclidean ≥ 0).
-    pub fn nearest(&self, query: &[f32], k: usize) -> Result<Vec<(K, f32)>, IndexError> {
-        if query.len() != self.dimensions {
-            return Err(IndexError::DimensionMismatch {
-                expected: self.dimensions,
-                got: query.len(),
-            });
-        }
-        if k == 0 {
-            return Err(IndexError::EmptyInput);
-        }
-        let mut scored: Vec<(K, f32)> = self
-            .entries
-            .iter()
-            .map(|(key, vec)| (key.clone(), score(self.metric, query, vec)))
-            .collect();
-        sort_by_metric(&mut scored, self.metric);
-        scored.truncate(k);
-        Ok(scored)
-    }
-
     /// Iterate `(key, vector)` pairs in arbitrary order.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &Vec<f32>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.entries.iter()
     }
 
@@ -122,7 +128,48 @@ impl<K: Hash + Eq + Clone> VectorIndex<K> {
     }
 }
 
-fn score(metric: SimilarityMetric, a: &[f32], b: &[f32]) -> f32 {
+impl<K: Hash + Eq + Clone, V: IndexVector> VectorIndex<K, V> {
+    pub fn insert(&mut self, key: K, vector: V) -> Result<(), IndexError> {
+        if vector.dimensions() != self.dimensions {
+            return Err(IndexError::DimensionMismatch {
+                expected: self.dimensions,
+                got: vector.dimensions(),
+            });
+        }
+        self.entries.insert(key, vector);
+        Ok(())
+    }
+
+    /// Find the `k` keys whose vectors are most similar to `query`.
+    /// Returns `(key, score)` pairs sorted best-first per the index metric.
+    /// `score` is the raw metric value (cosine ∈ [-1, 1], dot product
+    /// unbounded, euclidean ≥ 0).
+    ///
+    /// Ties keep the underlying `HashMap`'s arbitrary order, so two indexes
+    /// holding the same corpus can order equal scores differently.
+    pub fn nearest(&self, query: &V::Query, k: usize) -> Result<Vec<(K, f32)>, IndexError> {
+        let got = V::query_dimensions(query);
+        if got != self.dimensions {
+            return Err(IndexError::DimensionMismatch {
+                expected: self.dimensions,
+                got,
+            });
+        }
+        if k == 0 {
+            return Err(IndexError::EmptyInput);
+        }
+        let mut scored: Vec<(K, f32)> = self
+            .entries
+            .iter()
+            .map(|(key, vec)| (key.clone(), V::score(self.metric, query, vec)))
+            .collect();
+        sort_by_metric(&mut scored, self.metric);
+        scored.truncate(k);
+        Ok(scored)
+    }
+}
+
+pub(crate) fn score(metric: SimilarityMetric, a: &[f32], b: &[f32]) -> f32 {
     match metric {
         SimilarityMetric::Cosine => cosine_similarity(a, b),
         SimilarityMetric::DotProduct => dot(a, b),
@@ -151,7 +198,7 @@ fn euclidean(a: &[f32], b: &[f32]) -> f32 {
         .sqrt()
 }
 
-fn sort_by_metric<K>(scored: &mut [(K, f32)], metric: SimilarityMetric) {
+pub(crate) fn sort_by_metric<K>(scored: &mut [(K, f32)], metric: SimilarityMetric) {
     if metric.higher_is_better() {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     } else {

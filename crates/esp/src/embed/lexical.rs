@@ -26,16 +26,55 @@
 //! paraphrases with no shared tokens ("car" vs "automobile") stay apart. True
 //! semantic similarity needs the Burn-backed BERT provider (the `bert` feature).
 
+use std::collections::{HashMap, HashSet};
+
 use crate::embed::provider::{EmbedError, EmbeddingProvider, SimilarityMetric};
+use crate::embed::sparse::SparseVector;
 
 /// Compatibility/default token n-gram orders: unigrams only.
 pub const DEFAULT_TOKEN_NGRAM_ORDERS: [usize; 1] = [1];
 
+/// The dimension range this provider is built for on short texts — titles,
+/// tag sets, one-line descriptions.
+///
+/// Below it, distinct n-grams share buckets often enough to blur similarity;
+/// above it, a dense vector is nearly all zeros and costs `4 · dimensions`
+/// bytes to hold a handful of features. A number to check against a corpus
+/// rather than take on faith: [`LexicalEmbeddingProvider::hashing_stats`]
+/// reports the collision rate a candidate dimension actually produces, and
+/// [`LexicalEmbeddingProvider::embed_sparse`] removes the storage half of the
+/// argument entirely.
+pub const RECOMMENDED_DIMENSIONS_SHORT_TEXT: std::ops::RangeInclusive<usize> = 256..=512;
+
+/// What feature hashing did to a corpus at one dimension.
+///
+/// Produced by [`LexicalEmbeddingProvider::hashing_stats`]. Plain data, no
+/// assertions: a caller picks a dimension by measuring, and a test asserts
+/// whatever bound it wants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HashingStats {
+    /// Dimension (bucket count) measured.
+    pub dimensions: usize,
+    /// Texts examined.
+    pub texts: usize,
+    /// Total n-gram occurrences, counting repeats.
+    pub features: usize,
+    /// Distinct n-grams across the corpus.
+    pub distinct_features: usize,
+    /// Buckets those distinct n-grams landed in.
+    pub occupied_buckets: usize,
+    /// Distinct n-grams that had to share a bucket, as a fraction of
+    /// `distinct_features`: `(distinct - occupied) / distinct`. `0.0` on an
+    /// empty corpus.
+    pub collision_rate: f32,
+}
+
 /// Lexical feature-hashing embedding provider.
 ///
 /// Construction takes the output dimension (the number of hash buckets). Larger
-/// dimensions reduce token collisions at the cost of sparser vectors; 256–512 is
-/// a reasonable range for short texts like titles and tag sets.
+/// dimensions reduce token collisions at the cost of sparser vectors; see
+/// [`RECOMMENDED_DIMENSIONS_SHORT_TEXT`] for short texts like titles and tag
+/// sets, and [`Self::hashing_stats`] for measuring the trade on a real corpus.
 #[derive(Debug, Clone)]
 pub struct LexicalEmbeddingProvider {
     dimensions: usize,
@@ -47,6 +86,10 @@ impl LexicalEmbeddingProvider {
     ///
     /// This preserves the original provider's byte-stable feature hashes and
     /// vectors. Use [`Self::with_token_ngram_orders`] to opt into phrase features.
+    ///
+    /// `dimensions` is the bucket count. [`RECOMMENDED_DIMENSIONS_SHORT_TEXT`]
+    /// is the documented range for short texts; [`Self::hashing_stats`] turns
+    /// that guidance into a measurement over the caller's own corpus.
     pub fn new(dimensions: usize) -> Result<Self, EmbedError> {
         Self::with_token_ngram_orders(dimensions, DEFAULT_TOKEN_NGRAM_ORDERS)
     }
@@ -89,23 +132,107 @@ impl LexicalEmbeddingProvider {
         &self.token_ngram_orders
     }
 
-    /// Feature-hash one text into an L2-normalized token n-gram vector.
-    fn embed_text(&self, text: &str) -> Vec<f32> {
-        let mut vec = vec![0.0f32; self.dimensions];
+    /// Accumulated `(bucket, weight)` pairs for one text: ascending by bucket,
+    /// duplicates summed, not yet normalized. The shared core of the dense and
+    /// sparse forms, which is what makes them bit-identical.
+    fn hashed_pairs(&self, text: &str) -> Vec<(u32, f32)> {
         let tokens: Vec<String> = tokenize(text).collect();
+        let mut pairs: Vec<(u32, f32)> = Vec::new();
         for &order in &self.token_ngram_orders {
             for ngram in tokens.windows(order) {
                 let h = hash_token_ngram(ngram);
-                let idx = (h % self.dimensions as u64) as usize;
+                let idx = (h % self.dimensions as u64) as u32;
                 // Signed hashing (Weinberger et al.): a second hash bit picks the sign,
                 // so colliding features partially cancel instead of always reinforcing —
                 // it keeps the dot product an unbiased estimate of the true overlap.
                 let sign = if (h >> 63) & 1 == 0 { 1.0 } else { -1.0 };
-                vec[idx] += sign;
+                pairs.push((idx, sign));
             }
+        }
+        // Stable, so weights at one bucket sum in occurrence order — the order
+        // the dense `+=` used before this was factored out.
+        pairs.sort_by_key(|&(idx, _)| idx);
+        let mut merged: Vec<(u32, f32)> = Vec::with_capacity(pairs.len());
+        for (idx, weight) in pairs {
+            match merged.last_mut() {
+                Some(last) if last.0 == idx => last.1 += weight,
+                _ => merged.push((idx, weight)),
+            }
+        }
+        // A bucket whose signs cancelled exactly is a zero, and a sparse vector
+        // holds no zeros; dense leaves the same 0.0 there either way.
+        merged.retain(|&(_, weight)| weight != 0.0);
+        merged
+    }
+
+    /// Feature-hash one text into an L2-normalized token n-gram vector.
+    fn embed_text(&self, text: &str) -> Vec<f32> {
+        let mut vec = vec![0.0f32; self.dimensions];
+        for (idx, weight) in self.hashed_pairs(text) {
+            vec[idx as usize] = weight;
         }
         l2_normalize(&mut vec);
         vec
+    }
+
+    /// Feature-hash one text straight into a [`SparseVector`], never
+    /// materializing the dense form.
+    ///
+    /// `to_dense()` on the result equals [`EmbeddingProvider::embed_one`] bit
+    /// for bit: the same accumulation, and a normalization whose sum visits the
+    /// same terms in the same order (every omitted bucket contributes exactly
+    /// `0.0`). Cost is `8 · non-zeros` heap bytes rather than `4 · dimensions`.
+    pub fn embed_sparse_one(&self, text: &str) -> SparseVector {
+        let mut sparse = SparseVector::from_sorted(self.dimensions, self.hashed_pairs(text));
+        sparse.l2_normalize();
+        sparse
+    }
+
+    /// [`Self::embed_sparse_one`] over a batch, in input order.
+    pub fn embed_sparse(&self, texts: &[&str]) -> Vec<SparseVector> {
+        texts.iter().map(|t| self.embed_sparse_one(t)).collect()
+    }
+
+    /// Measure what hashing does to a corpus at this provider's dimension.
+    ///
+    /// Walks the same tokenization and the same n-gram orders `embed` uses and
+    /// reports how many distinct n-grams had to share a bucket. Diagnostic
+    /// only: it allocates per distinct feature and is not on the embed path.
+    pub fn hashing_stats<'a, I: IntoIterator<Item = &'a str>>(&self, texts: I) -> HashingStats {
+        let mut distinct: HashMap<String, u32> = HashMap::new();
+        let mut features = 0usize;
+        let mut texts_seen = 0usize;
+        for text in texts {
+            texts_seen += 1;
+            let tokens: Vec<String> = tokenize(text).collect();
+            for &order in &self.token_ngram_orders {
+                for ngram in tokens.windows(order) {
+                    features += 1;
+                    // The unit separator cannot appear inside an alphanumeric
+                    // token, matching `hash_token_ngram`'s own boundary.
+                    let name = ngram.join("\u{1f}");
+                    distinct.entry(name).or_insert_with(|| {
+                        (hash_token_ngram(ngram) % self.dimensions as u64) as u32
+                    });
+                }
+            }
+        }
+        let occupied: HashSet<u32> = distinct.values().copied().collect();
+        let distinct_features = distinct.len();
+        let occupied_buckets = occupied.len();
+        let collision_rate = if distinct_features == 0 {
+            0.0
+        } else {
+            (distinct_features - occupied_buckets) as f32 / distinct_features as f32
+        };
+        HashingStats {
+            dimensions: self.dimensions,
+            texts: texts_seen,
+            features,
+            distinct_features,
+            occupied_buckets,
+            collision_rate,
+        }
     }
 }
 
