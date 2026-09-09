@@ -30,7 +30,7 @@ use crate::embed::index::{IndexError, VectorIndex};
 /// bounded `0..=1`-ish score that maps straight to an affinity weight); with an
 /// unbounded metric (dot product) the caller should pick `min_similarity`
 /// accordingly.
-pub fn affinity_pairs<K: Hash + Eq + Clone>(
+pub fn affinity_pairs<K: Hash + Eq + Clone + Ord>(
     index: &VectorIndex<K>,
     top_k: usize,
     min_similarity: f32,

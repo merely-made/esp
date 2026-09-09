@@ -12,11 +12,9 @@
 //! order as the dense path, so every float it produces is bit-identical.
 //! Tolerance is therefore **zero** — the assertions compare `f32::to_bits`.
 //!
-//! What is *not* identical is tie order. Both indexes are `HashMap`-backed and
-//! `nearest` breaks ties by iteration order, so equal scores can swap; the
-//! ranking assertions below compare score sequences (exact) and top-k sets.
-
-use std::collections::HashSet;
+//! Ranking is identical too, and for a separate reason: `nearest` breaks equal
+//! scores by key, so neither index's result depends on hash-map iteration
+//! order. The assertions below compare whole ranked lists, keys included.
 
 use esp::embed::{
     EmbeddingProvider, LexicalEmbeddingProvider, RECOMMENDED_DIMENSIONS_SHORT_TEXT,
@@ -80,8 +78,8 @@ fn sparse_to_dense_is_bit_identical_over_a_mixed_corpus() {
                 bits_equal(&sparse.to_dense(), &dense),
                 "dense/sparse divergence at {setting} on {text:?}"
             );
-            // And the batch form agrees with the singular one.
-            let batch = provider.embed_sparse(&[text]);
+            // And the trait's batch form agrees with the singular one.
+            let batch = provider.embed_sparse(&[text]).unwrap().unwrap();
             assert_eq!(batch[0], sparse);
         }
     }
@@ -189,36 +187,23 @@ fn nearest_agrees_between_the_dense_and_sparse_indexes() {
                 .unwrap();
             assert_eq!(dense_hits.len(), sparse_hits.len());
 
-            // Scores in rank order are bit-identical (tolerance zero).
+            // Key *and* score at every rank, ties included — no tolerance and
+            // no set comparison to hide a swap behind.
             for (rank, (d, s)) in dense_hits.iter().zip(&sparse_hits).enumerate() {
+                assert_eq!(d.0, s.0, "key at rank {rank} for {query:?} at {setting}");
                 assert_eq!(
                     d.1.to_bits(),
                     s.1.to_bits(),
                     "score at rank {rank} for {query:?} at {setting}"
                 );
             }
-            // Keys agree wherever the score is unambiguous; ties may swap.
-            for (rank, (d, s)) in dense_hits.iter().zip(&sparse_hits).enumerate() {
-                if d.0 == s.0 {
-                    continue;
-                }
-                assert_eq!(
-                    d.1.to_bits(),
-                    s.1.to_bits(),
-                    "key differs at rank {rank} without a tie for {query:?} at {setting}"
-                );
-            }
-            // Top-10 sets match once ties at the boundary are accounted for.
+            // And the top-10 prefix, which is what a caller reads.
             let cut = 10.min(dense_hits.len());
-            if cut > 0 && (cut == dense_hits.len() || dense_hits[cut - 1].1 != dense_hits[cut].1) {
-                let dense_top: HashSet<usize> = dense_hits[..cut].iter().map(|(k, _)| *k).collect();
-                let sparse_top: HashSet<usize> =
-                    sparse_hits[..cut].iter().map(|(k, _)| *k).collect();
-                assert_eq!(
-                    dense_top, sparse_top,
-                    "top-{cut} for {query:?} at {setting}"
-                );
-            }
+            assert_eq!(
+                dense_hits[..cut],
+                sparse_hits[..cut],
+                "top-{cut} for {query:?} at {setting}"
+            );
         }
     }
 }
@@ -372,31 +357,27 @@ fn sparse_vs_dense_scale_receipt() {
         let sparse_heap: usize = sparse_index.iter().map(|(_, v)| v.heap_bytes()).sum();
         let sparse_bytes = sparse_heap as f64 / PAGES as f64 + 32.0;
 
-        // Scores at every rank must be bit-identical. The top-10 *set* can
-        // still differ when a tie straddles the cut: `nearest` breaks ties by
-        // `HashMap` order, and the two indexes hash different value types.
+        // Key and score at every rank must agree exactly. A tie straddling the
+        // cut used to let the top-10 diverge; the key tiebreak in `nearest`
+        // closed that, so `cut_ties` is now reported, not excused.
         let mut identical = 0usize;
         let mut cut_ties = 0usize;
         for (d, s) in dense_tops.iter().zip(&sparse_tops) {
             for (rank, (a, b)) in d.iter().zip(s).enumerate() {
+                assert_eq!(a.0, b.0, "key at rank {rank} diverged at {dims} dims");
                 assert_eq!(
                     a.1.to_bits(),
                     b.1.to_bits(),
                     "score at rank {rank} diverged at {dims} dims"
                 );
             }
-            let tied_at_cut = d.len() > TOP_K && d[TOP_K - 1].1 == d[TOP_K].1;
-            cut_ties += usize::from(tied_at_cut);
-            let dense_top: HashSet<u32> = d[..TOP_K].iter().map(|(k, _)| *k).collect();
-            let sparse_top: HashSet<u32> = s[..TOP_K].iter().map(|(k, _)| *k).collect();
-            if dense_top == sparse_top {
-                identical += 1;
-            } else {
-                assert!(
-                    tied_at_cut,
-                    "top-{TOP_K} differed at {dims} dims with no tie at the cut"
-                );
-            }
+            cut_ties += usize::from(d.len() > TOP_K && d[TOP_K - 1].1 == d[TOP_K].1);
+            assert_eq!(
+                d[..TOP_K],
+                s[..TOP_K],
+                "top-{TOP_K} differed at {dims} dims"
+            );
+            identical += 1;
         }
 
         for (label, bytes, total, ingest, query) in [

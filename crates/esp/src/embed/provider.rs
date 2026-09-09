@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::embed::sparse::SparseVector;
+
 /// Similarity metric an embedding provider declares for its output space.
 ///
 /// The choice affects how a vector index should compare vectors. Most
@@ -82,6 +84,17 @@ pub trait EmbeddingProvider: Send + Sync {
             EmbedError::Backend("provider returned no vectors for one input".to_string())
         })
     }
+
+    /// [`Self::embed`]'s sparse counterpart, for providers whose output is
+    /// mostly zeros. `None` — the default — means dense-only.
+    ///
+    /// Whether this returns `Some` is a property of the provider, not of the
+    /// input: callers probe capability with an empty batch. A `Some` result
+    /// must equal [`Self::embed`] on the same texts once densified.
+    fn embed_sparse(&self, texts: &[&str]) -> Option<Result<Vec<SparseVector>, EmbedError>> {
+        let _ = texts;
+        None
+    }
 }
 
 /// A boxed provider is a provider.
@@ -106,6 +119,10 @@ impl EmbeddingProvider for Box<dyn EmbeddingProvider> {
     fn embed_one(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         (**self).embed_one(text)
     }
+
+    fn embed_sparse(&self, texts: &[&str]) -> Option<Result<Vec<SparseVector>, EmbedError>> {
+        (**self).embed_sparse(texts)
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +139,10 @@ mod tests {
         assert_eq!(boxed.metric(), SimilarityMetric::Cosine);
         assert_eq!(boxed.embed_one("rust").unwrap().len(), 64);
         assert_eq!(boxed.embed(&["rust", "async"]).unwrap().len(), 2);
+        // Including the optional sparse path, capability probe and all.
+        assert!(boxed.embed_sparse(&[]).is_some());
+        let sparse = boxed.embed_sparse(&["rust"]).unwrap().unwrap();
+        assert_eq!(sparse[0].to_dense(), boxed.embed_one("rust").unwrap());
 
         // And it composes where a generic bound is expected, which is the
         // whole point: no consumer needs to name a backend type to get here.
@@ -129,6 +150,13 @@ mod tests {
             p.dimensions()
         }
         assert_eq!(takes_provider(boxed), 64);
+    }
+
+    #[test]
+    fn a_dense_only_provider_declines_sparse() {
+        let stub = crate::embed::StubEmbeddingProvider::new(8).unwrap();
+        assert!(stub.embed_sparse(&[]).is_none());
+        assert!(stub.embed_sparse(&["rust"]).is_none());
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! index over [`SparseVector`](crate::embed::SparseVector); both share this
 //! one `nearest` and one [`SimilarityMetric`] surface.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -145,9 +146,13 @@ impl<K: Hash + Eq + Clone, V: IndexVector> VectorIndex<K, V> {
     /// `score` is the raw metric value (cosine ∈ [-1, 1], dot product
     /// unbounded, euclidean ≥ 0).
     ///
-    /// Ties keep the underlying `HashMap`'s arbitrary order, so two indexes
-    /// holding the same corpus can order equal scores differently.
-    pub fn nearest(&self, query: &V::Query, k: usize) -> Result<Vec<(K, f32)>, IndexError> {
+    /// Equal scores order by key, so the result is a function of the corpus
+    /// and not of hash-map iteration order: two indexes holding the same
+    /// entries return the same top-`k` in the same order.
+    pub fn nearest(&self, query: &V::Query, k: usize) -> Result<Vec<(K, f32)>, IndexError>
+    where
+        K: Ord,
+    {
         let got = V::query_dimensions(query);
         if got != self.dimensions {
             return Err(IndexError::DimensionMismatch {
@@ -163,8 +168,7 @@ impl<K: Hash + Eq + Clone, V: IndexVector> VectorIndex<K, V> {
             .iter()
             .map(|(key, vec)| (key.clone(), V::score(self.metric, query, vec)))
             .collect();
-        sort_by_metric(&mut scored, self.metric);
-        scored.truncate(k);
+        select_top(&mut scored, k, self.metric);
         Ok(scored)
     }
 }
@@ -198,12 +202,32 @@ fn euclidean(a: &[f32], b: &[f32]) -> f32 {
         .sqrt()
 }
 
-pub(crate) fn sort_by_metric<K>(scored: &mut [(K, f32)], metric: SimilarityMetric) {
-    if metric.higher_is_better() {
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+/// Rank order: best score first per `metric`, equal scores by key. Total, so
+/// an unstable sort is safe and the ordering is reproducible.
+pub(crate) fn rank_order<K: Ord>(
+    metric: SimilarityMetric,
+    a: &(K, f32),
+    b: &(K, f32),
+) -> Ordering {
+    let by_score = if metric.higher_is_better() {
+        b.1.partial_cmp(&a.1)
     } else {
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        a.1.partial_cmp(&b.1)
+    };
+    // NaN cannot be ordered against anything; the key still decides.
+    by_score
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| a.0.cmp(&b.0))
+}
+
+/// Keep the best `k` in rank order. Partial sort — the tail past `k` is
+/// partitioned, never ordered.
+pub(crate) fn select_top<K: Ord>(scored: &mut Vec<(K, f32)>, k: usize, metric: SimilarityMetric) {
+    if k < scored.len() {
+        scored.select_nth_unstable_by(k, |a, b| rank_order(metric, a, b));
+        scored.truncate(k);
     }
+    scored.sort_unstable_by(|a, b| rank_order(metric, a, b));
 }
 
 #[cfg(test)]
@@ -366,6 +390,36 @@ mod tests {
         idx.insert(1, vec![1.0, 0.0, 0.0]).unwrap();
         idx.clear();
         assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn ties_order_by_key_regardless_of_insertion_order() {
+        // Same corpus, opposite insertion orders: identical scores throughout,
+        // so only the tiebreak can decide, and it must decide the same way.
+        let build = |keys: &[u32]| {
+            let mut idx = VectorIndex::<u32>::new(2, SimilarityMetric::Cosine);
+            for &k in keys {
+                idx.insert(k, vec![1.0, 0.0]).unwrap();
+            }
+            idx.nearest(&[1.0, 0.0], 3).unwrap()
+        };
+        let forward = build(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let backward = build(&[8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(forward, backward);
+        assert_eq!(
+            forward.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn euclidean_ties_also_order_by_key() {
+        let mut idx = VectorIndex::<u32>::new(2, SimilarityMetric::Euclidean);
+        for k in [5u32, 1, 3] {
+            idx.insert(k, vec![0.0, 1.0]).unwrap();
+        }
+        let hits = idx.nearest(&[0.0, 0.0], 2).unwrap();
+        assert_eq!(hits.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![1, 3]);
     }
 
     #[test]

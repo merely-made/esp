@@ -31,7 +31,7 @@ use eidetic::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use super::VectorIndex;
+use super::{SparseIndex, SparseVector, VectorIndex};
 
 /// Canonical bytes of the `VectorIndex` schema codicil payload.
 ///
@@ -55,6 +55,44 @@ pub fn vector_index_schema_ref() -> SchemaRef {
 pub static VECTOR_INDEX_SCHEMA_REF: std::sync::LazyLock<SchemaRef> =
     std::sync::LazyLock::new(vector_index_schema_ref);
 
+/// Canonical bytes of the `SparseIndex` schema codicil payload.
+///
+/// A separate schema, not a version bump on the dense one: the entry shape
+/// differs (a list of `(bucket, weight)` pairs plus the vector's dimension,
+/// not a dense array), so a reader that resolves this reference knows what it
+/// is holding without inspecting the data.
+const SPARSE_INDEX_SCHEMA_PAYLOAD: &[u8] = br#"{"format":"mere-native","schema_id":"embed.SparseIndex/v1","body":{"version":1,"description":"Persisted sparse vector index over embeddings: dimensions, metric, and key->sparse-vector entries, each vector holding its non-zero (index, weight) pairs ascending by index.","required":["dimensions","metric","entries"],"fields":{"dimensions":{"type":"u64"},"metric":{"type":"string"},"entries":{"type":"object"}}}}"#;
+
+/// Schema reference for `SparseIndex` codicils, from
+/// [`SPARSE_INDEX_SCHEMA_PAYLOAD`].
+pub fn sparse_index_schema_ref() -> SchemaRef {
+    SchemaRef::from_id(ManifestId::from_hash(ContentHash::of(
+        SPARSE_INDEX_SCHEMA_PAYLOAD,
+    )))
+}
+
+/// The well-known schema reference for persisted sparse vector indices.
+pub static SPARSE_INDEX_SCHEMA_REF: std::sync::LazyLock<SchemaRef> =
+    std::sync::LazyLock::new(sparse_index_schema_ref);
+
+/// The schema a stored representation declares. One per `V` in
+/// `VectorIndex<K, V>`; the key type is data-level and does not vary it.
+pub trait IndexSchema {
+    fn schema_ref() -> SchemaRef;
+}
+
+impl IndexSchema for Vec<f32> {
+    fn schema_ref() -> SchemaRef {
+        *VECTOR_INDEX_SCHEMA_REF
+    }
+}
+
+impl IndexSchema for SparseVector {
+    fn schema_ref() -> SchemaRef {
+        *SPARSE_INDEX_SCHEMA_REF
+    }
+}
+
 /// A local newtype carrying the [`TypedPayload`] schema for a [`VectorIndex`].
 ///
 /// `VectorIndex` (sibylla) and `TypedPayload` (eidetic) are both foreign to this
@@ -66,14 +104,15 @@ pub static VECTOR_INDEX_SCHEMA_REF: std::sync::LazyLock<SchemaRef> =
 /// are infrequent; the bytes are identical).
 #[derive(Serialize, serde::Deserialize)]
 #[serde(transparent)]
-struct PersistedIndex<K: Hash + Eq + Clone>(VectorIndex<K>);
+struct PersistedIndex<K: Hash + Eq + Clone, V>(VectorIndex<K, V>);
 
-impl<K> TypedPayload for PersistedIndex<K>
+impl<K, V> TypedPayload for PersistedIndex<K, V>
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
+    V: IndexSchema + Serialize + DeserializeOwned,
 {
     fn schema_ref() -> SchemaRef {
-        *VECTOR_INDEX_SCHEMA_REF
+        V::schema_ref()
     }
 }
 
@@ -90,6 +129,38 @@ pub async fn save_to_eidetic<K>(
 ) -> eidetic::Result<ManifestId>
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
+{
+    save_index(store, index, privacy, provenance, trust, created_at).await
+}
+
+/// [`save_to_eidetic`] for a [`SparseIndex`]. Its own codicil schema
+/// ([`SPARSE_INDEX_SCHEMA_REF`]), so a mistyped read is caught by the same
+/// schema check that guards the dense one.
+pub async fn save_sparse_to_eidetic<K>(
+    store: &mut dyn eidetic::Store,
+    index: &SparseIndex<K>,
+    privacy: PrivacyClass,
+    provenance: ProvenanceRecord,
+    trust: TrustEnvelope,
+    created_at: Timestamp,
+) -> eidetic::Result<ManifestId>
+where
+    K: Hash + Eq + Clone + Serialize + DeserializeOwned,
+{
+    save_index(store, index, privacy, provenance, trust, created_at).await
+}
+
+async fn save_index<K, V>(
+    store: &mut dyn eidetic::Store,
+    index: &VectorIndex<K, V>,
+    privacy: PrivacyClass,
+    provenance: ProvenanceRecord,
+    trust: TrustEnvelope,
+    created_at: Timestamp,
+) -> eidetic::Result<ManifestId>
+where
+    K: Hash + Eq + Clone + Serialize + DeserializeOwned,
+    V: IndexSchema + Clone + Serialize + DeserializeOwned,
 {
     save_typed(
         store,
@@ -117,7 +188,17 @@ pub async fn list_from_eidetic<K>(
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
 {
-    list_typed::<PersistedIndex<K>>(store).await
+    list_typed::<PersistedIndex<K, Vec<f32>>>(store).await
+}
+
+/// [`list_from_eidetic`] over the sparse schema.
+pub async fn list_sparse_from_eidetic<K>(
+    store: &mut dyn eidetic::Store,
+) -> eidetic::Result<Vec<BlobManifest>>
+where
+    K: Hash + Eq + Clone + Serialize + DeserializeOwned,
+{
+    list_typed::<PersistedIndex<K, SparseVector>>(store).await
 }
 
 /// Load a vector index by its manifest id. Returns `Ok(None)` if no
@@ -132,9 +213,26 @@ pub async fn load_from_eidetic<K>(
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
 {
-    Ok(load_typed::<PersistedIndex<K>>(store, fetcher, id)
+    Ok(load_typed::<PersistedIndex<K, Vec<f32>>>(store, fetcher, id)
         .await?
         .map(|persisted| persisted.0))
+}
+
+/// [`load_from_eidetic`] for a [`SparseIndex`]. A dense manifest id fails the
+/// schema check here, and a sparse one fails it there.
+pub async fn load_sparse_from_eidetic<K>(
+    store: &mut dyn eidetic::Store,
+    fetcher: &mut dyn BlobFetcher,
+    id: ManifestId,
+) -> eidetic::Result<Option<SparseIndex<K>>>
+where
+    K: Hash + Eq + Clone + Serialize + DeserializeOwned,
+{
+    Ok(
+        load_typed::<PersistedIndex<K, SparseVector>>(store, fetcher, id)
+            .await?
+            .map(|persisted| persisted.0),
+    )
 }
 
 #[cfg(test)]
@@ -303,6 +401,83 @@ mod tests {
     fn schema_ref_is_stable() {
         // Two derivations agree (no environmental input).
         assert_eq!(vector_index_schema_ref(), *VECTOR_INDEX_SCHEMA_REF);
+        assert_eq!(sparse_index_schema_ref(), *SPARSE_INDEX_SCHEMA_REF);
+        // And the two representations are not the same schema.
+        assert_ne!(*VECTOR_INDEX_SCHEMA_REF, *SPARSE_INDEX_SCHEMA_REF);
+    }
+
+    fn make_sparse_index() -> SparseIndex<u32> {
+        let provider = crate::embed::LexicalEmbeddingProvider::new(256).unwrap();
+        let mut idx = SparseIndex::<u32>::new(256, SimilarityMetric::Cosine);
+        for (key, text) in [(1u32, "rust async runtime"), (2, "italian dinner"), (3, "")] {
+            idx.insert(key, provider.embed_sparse_one(text)).unwrap();
+        }
+        idx
+    }
+
+    #[test]
+    fn sparse_save_and_load_roundtrip() {
+        pollster::block_on(async {
+            let mut store = InMemoryStore::default();
+            let mut fetcher = eidetic::NoFetcher;
+            let original = make_sparse_index();
+
+            let id = save_sparse_to_eidetic(
+                &mut store,
+                &original,
+                PrivacyClass::LocalOnly,
+                test_provenance(),
+                test_trust(),
+                Timestamp(0),
+            )
+            .await
+            .unwrap();
+
+            let listed = list_sparse_from_eidetic::<u32>(&mut store).await.unwrap();
+            assert!(listed.iter().any(|m| m.id == id));
+
+            let loaded: SparseIndex<u32> = load_sparse_from_eidetic(&mut store, &mut fetcher, id)
+                .await
+                .unwrap()
+                .expect("manifest present after save");
+            assert_eq!(loaded.dimensions(), original.dimensions());
+            assert_eq!(loaded.metric(), original.metric());
+            assert_eq!(loaded.len(), original.len());
+            for (k, v) in original.iter() {
+                assert_eq!(loaded.get(k), Some(v));
+            }
+            // Ranking survives the round trip, which is the point of storing it.
+            let query = crate::embed::LexicalEmbeddingProvider::new(256)
+                .unwrap()
+                .embed_sparse_one("rust runtime");
+            assert_eq!(
+                loaded.nearest(&query, 3).unwrap(),
+                original.nearest(&query, 3).unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn a_sparse_manifest_is_not_readable_as_a_dense_one() {
+        pollster::block_on(async {
+            let mut store = InMemoryStore::default();
+            let mut fetcher = eidetic::NoFetcher;
+            let id = save_sparse_to_eidetic(
+                &mut store,
+                &make_sparse_index(),
+                PrivacyClass::LocalOnly,
+                test_provenance(),
+                test_trust(),
+                Timestamp(0),
+            )
+            .await
+            .unwrap();
+            let mistyped: eidetic::Result<Option<VectorIndex<u32>>> =
+                load_from_eidetic(&mut store, &mut fetcher, id).await;
+            assert!(mistyped.is_err(), "separate schemas must catch the mix-up");
+            // And the listings do not bleed into one another.
+            assert!(list_from_eidetic::<u32>(&mut store).await.unwrap().is_empty());
+        });
     }
 
     #[test]

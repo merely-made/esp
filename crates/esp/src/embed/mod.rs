@@ -68,7 +68,9 @@ pub use lexical::{
 };
 #[cfg(feature = "persistence")]
 pub use persistence::{
-    VECTOR_INDEX_SCHEMA_REF, list_from_eidetic, load_from_eidetic, save_to_eidetic,
+    IndexSchema, SPARSE_INDEX_SCHEMA_REF, VECTOR_INDEX_SCHEMA_REF, list_from_eidetic,
+    list_sparse_from_eidetic, load_from_eidetic, load_sparse_from_eidetic, save_sparse_to_eidetic,
+    save_to_eidetic,
 };
 pub use provider::{EmbedError, EmbeddingProvider, SimilarityMetric};
 pub use search::{SearchError, SemanticSearch};

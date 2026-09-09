@@ -42,8 +42,8 @@ pub const DEFAULT_TOKEN_NGRAM_ORDERS: [usize; 1] = [1];
 /// bytes to hold a handful of features. A number to check against a corpus
 /// rather than take on faith: [`LexicalEmbeddingProvider::hashing_stats`]
 /// reports the collision rate a candidate dimension actually produces, and
-/// [`LexicalEmbeddingProvider::embed_sparse`] removes the storage half of the
-/// argument entirely.
+/// [`LexicalEmbeddingProvider::embed_sparse_one`] removes the storage half of
+/// the argument entirely.
 pub const RECOMMENDED_DIMENSIONS_SHORT_TEXT: std::ops::RangeInclusive<usize> = 256..=512;
 
 /// What feature hashing did to a corpus at one dimension.
@@ -188,10 +188,6 @@ impl LexicalEmbeddingProvider {
         sparse
     }
 
-    /// [`Self::embed_sparse_one`] over a batch, in input order.
-    pub fn embed_sparse(&self, texts: &[&str]) -> Vec<SparseVector> {
-        texts.iter().map(|t| self.embed_sparse_one(t)).collect()
-    }
 
     /// Measure what hashing does to a corpus at this provider's dimension.
     ///
@@ -247,6 +243,12 @@ impl EmbeddingProvider for LexicalEmbeddingProvider {
 
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
         Ok(texts.iter().map(|t| self.embed_text(t)).collect())
+    }
+
+    /// The hashed pairs are already the sparse form, so this is the cheaper
+    /// path, not a compression of the dense one.
+    fn embed_sparse(&self, texts: &[&str]) -> Option<Result<Vec<SparseVector>, EmbedError>> {
+        Some(Ok(texts.iter().map(|t| self.embed_sparse_one(t)).collect()))
     }
 }
 
