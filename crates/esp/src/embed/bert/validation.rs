@@ -36,7 +36,7 @@
 //! touching BERT internals.
 //!
 //! ```bash
-//! export SIBYLLA_MINILM_DIR=/path/to/all-MiniLM-L6-v2
+//! export ESP_MINILM_DIR=/path/to/all-MiniLM-L6-v2
 //! cargo test --features bert,bert-validation -- --ignored bert::validation::continuous
 //! ```
 //!
@@ -118,7 +118,7 @@ pub const TOLERANCE: f32 = 1.0e-4;
 
 #[cfg(test)]
 fn minilm_dir() -> Option<std::path::PathBuf> {
-    std::env::var("SIBYLLA_MINILM_DIR")
+    std::env::var("ESP_MINILM_DIR")
         .ok()
         .map(std::path::PathBuf::from)
 }
@@ -157,17 +157,17 @@ mod fixture_tests {
     /// download; run locally with the env var set:
     ///
     /// ```bash
-    /// export SIBYLLA_MINILM_DIR=/path/to/all-MiniLM-L6-v2
-    /// cargo test -p sibylla --features bert -- --ignored bert::validation
+    /// export ESP_MINILM_DIR=/path/to/all-MiniLM-L6-v2
+    /// cargo test -p esp --features bert -- --ignored bert::validation
     /// ```
     #[test]
-    #[ignore = "requires SIBYLLA_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
+    #[ignore = "requires ESP_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
     fn fixture_outputs_match_reference() {
         if FIXTURES.is_empty() {
             // Cleanly degrade: nothing to validate yet.
             return;
         }
-        let dir = minilm_dir().expect("SIBYLLA_MINILM_DIR must be set");
+        let dir = minilm_dir().expect("ESP_MINILM_DIR must be set");
         let artifacts = load_artifacts(&dir).expect("artifact loading should succeed");
 
         let device = Device::ndarray();

@@ -503,9 +503,9 @@ const MINILM_ARTIFACTS: &[(&str, &str)] = &[
 
 #[cfg(feature = "bert")]
 fn minilm_dir() -> PathBuf {
-    std::env::var_os("SIBYLLA_MINILM_DIR")
+    std::env::var_os("ESP_MINILM_DIR")
         .map(PathBuf::from)
-        .expect("SIBYLLA_MINILM_DIR must point at the fixed all-MiniLM-L6-v2 artifact")
+        .expect("ESP_MINILM_DIR must point at the fixed all-MiniLM-L6-v2 artifact")
 }
 
 #[cfg(feature = "bert")]
@@ -572,7 +572,7 @@ fn build_minilm_search(model_dir: &Path) -> (DenseSearch, u128, u128) {
 /// This stays ignored because the checkpoint is a 90 MB local artifact rather
 /// than a repository or CI fixture. Run on the portable CPU backend:
 ///
-/// `SIBYLLA_MINILM_DIR=/path/to/all-MiniLM-L6-v2 cargo test -p esp --features bert --test lexical_ngram_recall -- learned_minilm_baseline --ignored --nocapture --test-threads=1`
+/// `ESP_MINILM_DIR=/path/to/all-MiniLM-L6-v2 cargo test -p esp --features bert --test lexical_ngram_recall -- learned_minilm_baseline --ignored --nocapture --test-threads=1`
 #[cfg(feature = "bert")]
 #[test]
 #[ignore = "requires the digest-pinned all-MiniLM-L6-v2 artifact"]

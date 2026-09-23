@@ -4,7 +4,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // SPDX-License-Identifier: MPL-2.0
 
-//! sibylla — a local-embedding and semantic-retrieval seam.
+//! Local embedding and semantic retrieval.
 //!
 //! One trait ([`EmbeddingProvider`]) that turns text into fixed-dimension
 //! vectors, a [`SimilarityMetric`] each provider declares for its output space,
@@ -33,8 +33,7 @@
 //! the Burn-backed [`BertEmbeddingProvider`](bert::BertEmbeddingProvider) — the
 //! in-process semantic embedder (MiniLM-class) — behind `bert` / `bert-wgpu`.
 //!
-//! Sibling to vates (generation). Where vates voices and foretells, sibylla is
-//! the consulted corpus: it embeds and returns what is asked for.
+//! The generation half of the crate is [`crate::infer`].
 
 pub mod affinity;
 #[cfg(feature = "bert")]

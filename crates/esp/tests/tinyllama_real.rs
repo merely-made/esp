@@ -5,12 +5,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Real-checkpoint validation for the decoder (inference plan P1's
-//! payoff receipts). All `#[ignore]`d — they need `VATES_TINYLLAMA_DIR`
+//! payoff receipts). All `#[ignore]`d — they need `ESP_TINYLLAMA_DIR`
 //! pointing at a directory with TinyLlama-1.1B-Chat-v1.0's `config.json`
 //! / `tokenizer.json` / `model.safetensors` (HF layout, bf16). Run:
 //!
 //! ```bash
-//! VATES_TINYLLAMA_DIR=C:/t/models/TinyLlama-1.1B-Chat-v1.0 \
+//! ESP_TINYLLAMA_DIR=C:/t/models/TinyLlama-1.1B-Chat-v1.0 \
 //!     cargo test -p esp --features decoder-wgpu --release \
 //!     --test tinyllama_real -- --ignored --nocapture --test-threads=1
 //! ```
@@ -24,11 +24,11 @@ use esp::infer::decoder::DecoderProvider;
 use esp::infer::{GenerationRequest, InferenceProvider};
 
 fn model_dir() -> Option<PathBuf> {
-    std::env::var("VATES_TINYLLAMA_DIR").ok().map(PathBuf::from)
+    std::env::var("ESP_TINYLLAMA_DIR").ok().map(PathBuf::from)
 }
 
 fn load_provider(device: burn::tensor::Device, loader: &str) -> DecoderProvider {
-    let dir = model_dir().expect("VATES_TINYLLAMA_DIR must be set");
+    let dir = model_dir().expect("ESP_TINYLLAMA_DIR must be set");
     let config = std::fs::read(dir.join("config.json")).expect("read config.json");
     let tokenizer = std::fs::read(dir.join("tokenizer.json")).expect("read tokenizer.json");
     let weights = std::fs::read(dir.join("model.safetensors")).expect("read model.safetensors");
@@ -60,7 +60,7 @@ fn request(prompt: &str, max_tokens: usize) -> GenerationRequest {
 /// is numerically right; garbage weights produce garbage tokens, not
 /// "Paris".
 #[test]
-#[ignore = "requires VATES_TINYLLAMA_DIR (2.2GB checkpoint)"]
+#[ignore = "requires ESP_TINYLLAMA_DIR (2.2GB checkpoint)"]
 fn greedy_continuation_answers_paris() {
     let provider = load_provider(burn::tensor::Device::ndarray(), "burn-ndarray");
     let out = provider
@@ -76,7 +76,7 @@ fn greedy_continuation_answers_paris() {
 /// Streaming deltas concatenate to the same text the collected call
 /// returns, on the real BPE tokenizer (byte-level boundaries included).
 #[test]
-#[ignore = "requires VATES_TINYLLAMA_DIR (2.2GB checkpoint)"]
+#[ignore = "requires ESP_TINYLLAMA_DIR (2.2GB checkpoint)"]
 fn streaming_matches_collected_on_real_tokenizer() {
     let provider = load_provider(burn::tensor::Device::ndarray(), "burn-ndarray");
     let req = request("The capital of France is", 8);
@@ -94,7 +94,7 @@ fn streaming_matches_collected_on_real_tokenizer() {
 /// Tokens/sec, CPU vs GPU: prefill + 16 greedy tokens on each backend.
 #[cfg(feature = "decoder-wgpu")]
 #[test]
-#[ignore = "requires VATES_TINYLLAMA_DIR (2.2GB checkpoint) and a GPU"]
+#[ignore = "requires ESP_TINYLLAMA_DIR (2.2GB checkpoint) and a GPU"]
 fn timing_tokens_per_second_cpu_vs_gpu() {
     let gpu_device = burn::tensor::Device::wgpu(burn::tensor::DeviceKind::default());
     let prompt = "The old lighthouse keeper climbed the stairs and";

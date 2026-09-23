@@ -93,20 +93,8 @@ impl IndexSchema for SparseVector {
     }
 }
 
-/// A local newtype carrying the [`TypedPayload`] schema for a [`VectorIndex`].
-///
-/// `VectorIndex` (sibylla) and `TypedPayload` (eidetic) are both foreign to this
-/// crate, so the impl cannot sit on `VectorIndex` directly — the orphan rule
-/// forbids it. `TypedPayload` requires `Serialize + DeserializeOwned`, so the
-/// wrapper owns its index (a borrowing form cannot deserialize). It is
-/// `#[serde(transparent)]`, so it serializes byte-identically to the raw index —
-/// the persisted format and its schema are unchanged. Save clones into it (saves
-/// are infrequent; the bytes are identical).
-#[derive(Serialize, serde::Deserialize)]
-#[serde(transparent)]
-struct PersistedIndex<K: Hash + Eq + Clone, V>(VectorIndex<K, V>);
-
-impl<K, V> TypedPayload for PersistedIndex<K, V>
+/// A [`VectorIndex`] is its own typed payload; its schema is chosen by `V`.
+impl<K, V> TypedPayload for VectorIndex<K, V>
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
     V: IndexSchema + Serialize + DeserializeOwned,
@@ -160,11 +148,11 @@ async fn save_index<K, V>(
 ) -> eidetic::Result<ManifestId>
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
-    V: IndexSchema + Clone + Serialize + DeserializeOwned,
+    V: IndexSchema + Serialize + DeserializeOwned,
 {
     save_typed(
         store,
-        &PersistedIndex(index.clone()),
+        index,
         Vec::<BlobSource>::new(),
         privacy,
         provenance,
@@ -177,18 +165,14 @@ where
 /// List the manifests of every stored vector index. Ordering is the store's;
 /// callers pick (typically the newest by `created_at`).
 ///
-/// This is the listing counterpart to [`save_to_eidetic`] / [`load_from_eidetic`],
-/// and it has to live here: `eidetic::list_typed` is generic over the
-/// [`TypedPayload`] that carries the schema, and the only type carrying
-/// `VectorIndex`'s schema is the private `PersistedIndex` newtype above. A caller
-/// outside this module cannot name it, so it cannot list without this.
+/// This is the listing counterpart to [`save_to_eidetic`] / [`load_from_eidetic`].
 pub async fn list_from_eidetic<K>(
     store: &mut dyn eidetic::Store,
 ) -> eidetic::Result<Vec<BlobManifest>>
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
 {
-    list_typed::<PersistedIndex<K, Vec<f32>>>(store).await
+    list_typed::<VectorIndex<K, Vec<f32>>>(store).await
 }
 
 /// [`list_from_eidetic`] over the sparse schema.
@@ -198,7 +182,7 @@ pub async fn list_sparse_from_eidetic<K>(
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
 {
-    list_typed::<PersistedIndex<K, SparseVector>>(store).await
+    list_typed::<VectorIndex<K, SparseVector>>(store).await
 }
 
 /// Load a vector index by its manifest id. Returns `Ok(None)` if no
@@ -213,9 +197,7 @@ pub async fn load_from_eidetic<K>(
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
 {
-    Ok(load_typed::<PersistedIndex<K, Vec<f32>>>(store, fetcher, id)
-        .await?
-        .map(|persisted| persisted.0))
+    load_typed::<VectorIndex<K, Vec<f32>>>(store, fetcher, id).await
 }
 
 /// [`load_from_eidetic`] for a [`SparseIndex`]. A dense manifest id fails the
@@ -228,11 +210,7 @@ pub async fn load_sparse_from_eidetic<K>(
 where
     K: Hash + Eq + Clone + Serialize + DeserializeOwned,
 {
-    Ok(
-        load_typed::<PersistedIndex<K, SparseVector>>(store, fetcher, id)
-            .await?
-            .map(|persisted| persisted.0),
-    )
+    load_typed::<VectorIndex<K, SparseVector>>(store, fetcher, id).await
 }
 
 #[cfg(test)]

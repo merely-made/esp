@@ -11,7 +11,7 @@
 //! dims and should run in release:
 //!
 //! ```bash
-//! cargo test -p sibylla --features bert-wgpu --release \
+//! cargo test -p esp --features bert-wgpu --release \
 //!     -- --ignored timing --nocapture
 //! ```
 
@@ -153,10 +153,10 @@ fn bert_sentence_parity_ndarray_wgpu() {
 /// but runs them on native Wgpu. Keep it ignored because the model artifact
 /// is intentionally external to the repository.
 #[test]
-#[ignore = "requires SIBYLLA_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
+#[ignore = "requires ESP_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
 fn real_minilm_fixture_wgpu() {
-    let model_dir = std::env::var("SIBYLLA_MINILM_DIR")
-        .expect("SIBYLLA_MINILM_DIR must point at all-MiniLM-L6-v2");
+    let model_dir = std::env::var("ESP_MINILM_DIR")
+        .expect("ESP_MINILM_DIR must point at all-MiniLM-L6-v2");
     let fixture = FIXTURES
         .first()
         .expect("the MiniLM reference fixture must be populated");

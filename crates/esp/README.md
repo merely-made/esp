@@ -41,5 +41,5 @@ a host executor at runtime. See the
 for the precise compile, execution, and headed-browser boundaries.
 
 The historical Vates and Sibylla documents are retained under `design_docs/`
-with supersession notes. The `vates` and `sibylla` packages are compatibility
-shims; new code should depend on `esp` directly.
+with supersession notes. The `vates` and `sibylla` compatibility packages were
+removed on 2026-09-23; `esp` is the only package.

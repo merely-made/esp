@@ -21,7 +21,7 @@
 //! provided collect-it-all wrapper.
 //!
 //! The decoder (own Burn llama-family decoder, `decoder` / `decoder-wgpu`) and
-//! the streaming actor (`actor`, on Armillary threads) moved here from Vates.
+//! the streaming actor (`actor`, on Armillary threads) live here.
 //! External OpenAI-compatible endpoints remain a separate roadmap lane.
 
 #[cfg(feature = "actor")]
