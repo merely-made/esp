@@ -130,13 +130,40 @@ fn token_batch(config: &BertConfig, batch: usize, seq: usize) -> Vec<Vec<i32>> {
         .collect()
 }
 
+fn assert_parity_inputs(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len(), "parity output lengths differ");
+    assert!(
+        a.iter().chain(b).all(|value| value.is_finite()),
+        "parity output contains a non-finite value"
+    );
+}
+
+#[test]
+fn parity_inputs_accept_finite_equal_lengths() {
+    assert_parity_inputs(&[0.0, -1.0], &[0.0, 1.0]);
+}
+
+#[test]
+fn parity_inputs_reject_non_finite_values_on_either_side() {
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[value], &[0.0])).is_err());
+        assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[0.0], &[value])).is_err());
+    }
+}
+
+#[test]
+fn parity_inputs_reject_unequal_lengths() {
+    assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[0.0], &[])).is_err());
+    assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[], &[0.0])).is_err());
+}
+
 #[test]
 fn bert_sentence_parity_ndarray_wgpu() {
     let cfg = tiny_config();
     let ids = token_batch(&cfg, 3, 5);
     let cpu = sentence_on(&cfg, &ids, &cpu_device());
     let gpu = sentence_on(&cfg, &ids, &gpu_device());
-    assert_eq!(cpu.len(), gpu.len());
+    assert_parity_inputs(&cpu, &gpu);
     let max_diff = cpu
         .iter()
         .zip(&gpu)
