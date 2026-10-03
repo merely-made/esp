@@ -14,13 +14,17 @@
 //! semantically-similar items draw together even with no explicit link between
 //! them.
 //!
-//! Pure over a [`VectorIndex`]; no layout or graph dependency. The caller maps the
-//! returned key `K` to its own node handle and builds the spring.
+//! Pure over a [`VectorIndex`] of any vector representation, dense or
+//! [`SparseVector`](crate::embed::SparseVector); no layout or graph dependency.
+//! The caller maps the returned key `K` to its own node handle and builds the
+//! spring. [`AffinityScan`] is the same search in resumable steps, for a
+//! caller that must not spend one frame on all of it.
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use crate::embed::index::{IndexError, VectorIndex};
+use crate::embed::index::{IndexError, IndexVector, VectorIndex};
 
 /// Build affinity pairs from an embedding index: for each entry, its `top_k`
 /// nearest neighbours with similarity `>= min_similarity`, weight = similarity
@@ -29,38 +33,93 @@ use crate::embed::index::{IndexError, VectorIndex};
 /// The index's metric decides "nearest" — cosine is the intended one (a
 /// bounded `0..=1`-ish score that maps straight to an affinity weight); with an
 /// unbounded metric (dot product) the caller should pick `min_similarity`
-/// accordingly.
-pub fn affinity_pairs<K: Hash + Eq + Clone + Ord>(
-    index: &VectorIndex<K>,
+/// accordingly. Entries are visited in key order, so the result's order is a
+/// function of the index's contents.
+pub fn affinity_pairs<K, V>(
+    index: &VectorIndex<K, V>,
     top_k: usize,
     min_similarity: f32,
-) -> Result<Vec<(K, K, f32)>, IndexError> {
-    // Snapshot entries so the per-node `nearest` queries don't hold the iter borrow.
-    let entries: Vec<(K, Vec<f32>)> = index
-        .iter()
-        .map(|(key, vec)| (key.clone(), vec.clone()))
-        .collect();
+) -> Result<Vec<(K, K, f32)>, IndexError>
+where
+    K: Hash + Eq + Clone + Ord,
+    V: IndexVector + Clone + Borrow<V::Query>,
+{
+    let mut scan = AffinityScan::new(index, top_k, min_similarity);
+    while !scan.advance(index, usize::MAX)? {}
+    Ok(scan.into_pairs())
+}
 
-    let mut seen: HashSet<(K, K)> = HashSet::new();
-    let mut pairs: Vec<(K, K, f32)> = Vec::new();
-    for (key, vec) in &entries {
-        // `+1` because the nearest set includes the node itself (similarity to
-        // its own vector) at the top.
-        let neighbours = index.nearest(vec, top_k + 1)?;
-        for (neighbour, similarity) in neighbours {
-            if &neighbour == key || similarity < min_similarity {
-                continue;
-            }
-            // Emit each unordered pair once: skip if the reverse already landed.
-            if seen.contains(&(neighbour.clone(), key.clone())) {
-                continue;
-            }
-            if seen.insert((key.clone(), neighbour.clone())) {
-                pairs.push((key.clone(), neighbour, similarity.clamp(0.0, 1.0)));
-            }
+/// [`affinity_pairs`] in resumable steps: [`advance`](Self::advance) queries
+/// at most `rows` entries a call, so a caller on a frame loop spreads the
+/// all-pairs search over frames. The result equals [`affinity_pairs`] over
+/// the same index. The scan snapshots the entries when it starts; pass the
+/// same, unchanged index to every step.
+#[derive(Clone, Debug)]
+pub struct AffinityScan<K, V> {
+    entries: Vec<(K, V)>,
+    next: usize,
+    top_k: usize,
+    min_similarity: f32,
+    seen: HashSet<(K, K)>,
+    pairs: Vec<(K, K, f32)>,
+}
+
+impl<K, V> AffinityScan<K, V>
+where
+    K: Hash + Eq + Clone + Ord,
+    V: IndexVector + Clone + Borrow<V::Query>,
+{
+    pub fn new(index: &VectorIndex<K, V>, top_k: usize, min_similarity: f32) -> Self {
+        let mut entries: Vec<(K, V)> = index
+            .iter()
+            .map(|(key, vector)| (key.clone(), vector.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Self {
+            entries,
+            next: 0,
+            top_k,
+            min_similarity,
+            seen: HashSet::new(),
+            pairs: Vec::new(),
         }
     }
-    Ok(pairs)
+
+    /// Query up to `rows` more entries; `true` once every entry has been.
+    pub fn advance(&mut self, index: &VectorIndex<K, V>, rows: usize) -> Result<bool, IndexError> {
+        let end = self.next.saturating_add(rows).min(self.entries.len());
+        while self.next < end {
+            let (key, vector) = &self.entries[self.next];
+            // `+1` because the nearest set includes the entry itself at the top.
+            let neighbours = index.nearest(vector.borrow(), self.top_k + 1)?;
+            for (neighbour, similarity) in neighbours {
+                if &neighbour == key || similarity < self.min_similarity {
+                    continue;
+                }
+                // Each unordered pair once: skip if the reverse already landed.
+                if self.seen.contains(&(neighbour.clone(), key.clone())) {
+                    continue;
+                }
+                if self.seen.insert((key.clone(), neighbour.clone())) {
+                    self.pairs
+                        .push((key.clone(), neighbour, similarity.clamp(0.0, 1.0)));
+                }
+            }
+            self.next += 1;
+        }
+        Ok(self.next >= self.entries.len())
+    }
+
+    /// `(entries queried, entries in all)`.
+    pub fn progress(&self) -> (usize, usize) {
+        (self.next, self.entries.len())
+    }
+
+    /// The pairs found so far: all of them once [`advance`](Self::advance)
+    /// has returned `true`.
+    pub fn into_pairs(self) -> Vec<(K, K, f32)> {
+        self.pairs
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +205,42 @@ mod tests {
     fn empty_index_yields_no_pairs() {
         let index = VectorIndex::<u32>::new(4, SimilarityMetric::Cosine);
         assert!(affinity_pairs(&index, 3, 0.8).unwrap().is_empty());
+    }
+
+    /// The same texts through the dense and the sparse lexical index give
+    /// the same pairs (the sparse scores are bit-identical), and a scan in
+    /// steps of one row gives the same pairs as the whole search.
+    #[test]
+    fn sparse_and_stepped_searches_match_the_dense_one() {
+        use crate::embed::{EmbeddingProvider, LexicalEmbeddingProvider, SparseIndex};
+        let provider = LexicalEmbeddingProvider::new(256).unwrap();
+        let texts = [
+            "rust async runtime",
+            "async rust internals",
+            "sourdough bread starter",
+            "baking bread at home",
+            "saturn rings",
+            "the rings of saturn",
+        ];
+        let mut dense = VectorIndex::new(256, SimilarityMetric::Cosine);
+        let mut sparse = SparseIndex::new(256, SimilarityMetric::Cosine);
+        for (i, text) in texts.iter().enumerate() {
+            dense
+                .insert(i as u32, provider.embed_one(text).unwrap())
+                .unwrap();
+            sparse
+                .insert(i as u32, provider.embed_sparse_one(text))
+                .unwrap();
+        }
+        let whole = affinity_pairs(&dense, 2, 0.1).unwrap();
+        assert!(!whole.is_empty(), "the texts pair up");
+        assert_eq!(affinity_pairs(&sparse, 2, 0.1).unwrap(), whole);
+        let mut scan = AffinityScan::new(&sparse, 2, 0.1);
+        let mut steps = 0;
+        while !scan.advance(&sparse, 1).unwrap() {
+            steps += 1;
+        }
+        assert_eq!(steps, texts.len() - 1, "one row a step");
+        assert_eq!(scan.into_pairs(), whole);
     }
 }

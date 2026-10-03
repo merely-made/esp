@@ -53,7 +53,7 @@ pub mod search;
 pub mod sparse;
 pub mod stub;
 
-pub use affinity::affinity_pairs;
+pub use affinity::{AffinityScan, affinity_pairs};
 #[cfg(feature = "bert")]
 pub use bert::{
     BGE_MICRO_V2, BertConfig, BertEmbeddingProvider, MINILM_L6_V2, SNOWFLAKE_ARCTIC_EMBED_XS,
