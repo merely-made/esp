@@ -535,17 +535,21 @@ pub fn load_cpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider
     Ok(Box::new(provider))
 }
 
-/// Load the BERT provider on the WebGPU backend, as the provider seam.
+/// Load the BERT provider on the WebGPU backend, as the provider seam, on the
+/// device the caller names.
 ///
-/// Same bargain as [`load_cpu`], and the same caveat about existing devices —
-/// which bites harder here, since a host with its own `wgpu` queue will want to
-/// register it rather than let Burn open a second one.
+/// A host with a renderer passes the device it already registered with CubeCL
+/// (`Device::new(WgpuDevice::Existing(id))`), so the model shares that device
+/// rather than opening a second one ("Burn on the host device, off-path",
+/// dynamics grammar plan, G2). A tool with no device of its own boots one
+/// explicitly, e.g. `Device::wgpu(DeviceKind::DiscreteGpu(0))`, which is what
+/// this function chose for every caller before.
 #[cfg(feature = "bert-wgpu")]
-pub fn load_wgpu(model_dir: impl AsRef<Path>) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
-    let provider = BertEmbeddingProvider::load(
-        model_dir,
-        Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0)),
-    )?;
+pub fn load_wgpu(
+    model_dir: impl AsRef<Path>,
+    device: Device,
+) -> Result<Box<dyn EmbeddingProvider>, EmbedError> {
+    let provider = BertEmbeddingProvider::load(model_dir, device)?;
     Ok(Box::new(provider))
 }
 

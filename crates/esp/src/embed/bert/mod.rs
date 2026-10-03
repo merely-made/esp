@@ -42,6 +42,10 @@ pub mod validation;
 mod wgpu_parity;
 
 pub use attention::{BertAttention, BertSelfAttention, BertSelfOutput};
+/// The device types [`load_wgpu`] takes, so a caller names a device without
+/// depending on Burn.
+#[cfg(feature = "bert-wgpu")]
+pub use burn::tensor::{Device, DeviceKind};
 pub use config::{BGE_MICRO_V2, BertConfig, MINILM_L6_V2, SNOWFLAKE_ARCTIC_EMBED_XS};
 pub use embeddings::BertEmbeddings;
 pub use encoder::BertEncoder;
