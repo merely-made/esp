@@ -68,7 +68,7 @@ decoder = ["dep:burn", "dep:serde_json", "dep:safetensors", "dep:half", "dep:tok
 decoder-wgpu = ["decoder", "burn/wgpu", "dep:wgpu", "dep:pollster"]
 decoder-lora = ["decoder", "model-session"]
 # The autodiff LoRA trainer (v1). `burn/optim` already implies `burn/autodiff`
-# in burn 0.22.0-pre.2 (`optim = ["burn-optim", "autodiff"]`); `burn/autodiff`
+# in burn 0.22.0-pre.4 (`optim = ["burn-optim", "autodiff"]`); `burn/autodiff`
 # is named here anyway because the trainer's gradients are the contract and a
 # future burn that decouples the two must not silently drop them.
 decoder-autodiff = ["decoder-lora", "burn/autodiff", "burn/optim"]
