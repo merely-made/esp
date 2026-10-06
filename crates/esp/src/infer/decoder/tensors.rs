@@ -116,7 +116,7 @@ mod tests {
             .collect();
         let view = TensorView::new(Dtype::BF16, vec![4], &bf16_bytes).unwrap();
         let t: Tensor<1> = extract_1d(&view, 4, &device).unwrap();
-        let out = t.into_data().to_vec::<f32>().unwrap();
+        let out = t.into_data().try_to_vec::<f32>().unwrap();
         for (a, b) in out.iter().zip(&values) {
             assert!(
                 (a - b).abs() < 0.02,
@@ -133,7 +133,7 @@ mod tests {
         let view = TensorView::new(Dtype::F32, vec![2, 3], &bytes).unwrap();
         let t: Tensor<2> = extract_2d_transposed(&view, 2, 3, &device).unwrap();
         assert_eq!(t.dims(), [3, 2]);
-        let out = t.into_data().to_vec::<f32>().unwrap();
+        let out = t.into_data().try_to_vec::<f32>().unwrap();
         assert_eq!(out, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
 

@@ -36,7 +36,7 @@ impl TokenPicker {
                     .clone()
                     .slice([0..1, (seq - 1)..seq, 0..vocab])
                     .into_data()
-                    .to_vec::<f32>()
+                    .try_to_vec::<f32>()
                     .expect("logits row");
                 sampler.sample(&row)
             },
@@ -55,7 +55,7 @@ impl TokenPicker {
                     .await
                     .map_err(|error| format!("read logits row: {error}"))?;
                 let row = data
-                    .to_vec::<f32>()
+                    .try_to_vec::<f32>()
                     .map_err(|error| format!("decode logits row: {error}"))?;
                 Ok(sampler.sample(&row))
             },

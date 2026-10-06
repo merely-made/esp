@@ -116,7 +116,7 @@ fn sentence_on(config: &BertConfig, ids: &[Vec<i32>], dev: &Device) -> Vec<f32> 
     model
         .forward_sentence(input_ids, Pooling::Mean, true)
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
 }
 
@@ -246,7 +246,7 @@ fn timing_bert_cpu_vs_gpu() {
         let _ = model
             .forward_sentence(input, Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let cpu_us = t.elapsed().as_micros();
 
@@ -256,13 +256,13 @@ fn timing_bert_cpu_vs_gpu() {
         let _warm = model
             .forward_sentence(input.clone(), Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let t = std::time::Instant::now();
         let _ = model
             .forward_sentence(input, Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let gpu_us = t.elapsed().as_micros();
 

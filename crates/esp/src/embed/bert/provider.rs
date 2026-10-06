@@ -204,7 +204,7 @@ impl BertEmbeddingProvider {
             .into_data_async()
             .await
             .map_err(|e| EmbedError::Backend(format!("tensor readback: {e:?}")))?
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .map_err(|e| EmbedError::Backend(format!("tensor to Vec<f32>: {e:?}")))?;
         Ok(rows_from_flat(flat, dims))
     }
@@ -235,7 +235,7 @@ impl BertEmbeddingProvider {
             .into_data_async()
             .await
             .map_err(|e| EmbedError::Backend(format!("input trace readback: {e:?}")))?
-            .to_vec::<i32>()
+            .try_to_vec::<i32>()
             .map_err(|e| EmbedError::Backend(format!("input trace to Vec<i32>: {e:?}")))?;
 
         let embedding_word_immediate = trace_float_tensor(
@@ -366,7 +366,7 @@ async fn trace_int_tensor<const D: usize>(
         .into_data_async()
         .await
         .map_err(|e| EmbedError::Backend(format!("{stage} trace readback: {e:?}")))?
-        .to_vec::<i32>()
+        .try_to_vec::<i32>()
         .map_err(|e| EmbedError::Backend(format!("{stage} trace to Vec<i32>: {e:?}")))
 }
 
@@ -380,7 +380,7 @@ async fn trace_float_tensor<const D: usize>(
         .into_data_async()
         .await
         .map_err(|e| EmbedError::Backend(format!("{stage} trace readback: {e:?}")))?
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .map_err(|e| EmbedError::Backend(format!("{stage} trace to Vec<f32>: {e:?}")))?;
     let first_8: Vec<f32> = values.iter().take(8).copied().collect();
     let first_8_bits = first_8.iter().map(|value| value.to_bits()).collect();
@@ -437,7 +437,7 @@ impl EmbeddingProvider for BertEmbeddingProvider {
         let dims = output.dims();
         let flat = output
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .map_err(|e| EmbedError::Backend(format!("tensor to Vec<f32>: {e:?}")))?;
         Ok(rows_from_flat(flat, dims))
     }

@@ -210,7 +210,7 @@ impl DecoderProvider {
         logits
             .slice([0..1, (sequence - 1)..sequence, 0..vocabulary])
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .map_err(|error| InferError::Backend(format!("decode next-token logits: {error}")))
     }
 

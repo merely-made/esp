@@ -323,7 +323,7 @@ mod tests {
         let device = Device::ndarray();
         let rope = LlamaRotaryEncoding::new(4, 4, 10_000.0, &device);
         let input = Tensor::from_data([[[[1.0, 2.0, 3.0, 4.0]]]], &device);
-        let output = rope.apply(input, 1).into_data().to_vec::<f32>().unwrap();
+        let output = rope.apply(input, 1).into_data().try_to_vec::<f32>().unwrap();
         let angle0 = 1.0_f32;
         let angle1 = 1.0_f32 / 100.0;
         let expected = [
@@ -362,7 +362,7 @@ mod tests {
         let a = attn
             .forward(base, &rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let b = perturbed_out(&attn, perturbed, &rope);
 
@@ -394,7 +394,7 @@ mod tests {
     ) -> Vec<f32> {
         attn.forward(x, rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
     }
 
@@ -439,12 +439,12 @@ mod tests {
         let a = gqa
             .forward(x.clone(), &rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let b = mha
             .forward(x, &rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert!(
             a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1.0e-5),
