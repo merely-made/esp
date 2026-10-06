@@ -22,7 +22,7 @@ armillary = { path = "../../armillary", version = "0.1.0", optional = true }
 
 # Shared model tree. NdArray is the portable baseline; the `-wgpu` features add
 # Burn's WebGPU backend without changing the model bodies.
-burn = { version = "=0.22.0-pre.4", default-features = false, features = ["ndarray", "std"], optional = true }
+burn = { version = "=0.22.0", default-features = false, features = ["ndarray", "std"], optional = true }
 tracing = { version = "0.1", optional = true }
 serde_json = { version = "1.0", optional = true }
 safetensors = { version = "0.4", optional = true }
@@ -68,7 +68,7 @@ decoder = ["dep:burn", "dep:serde_json", "dep:safetensors", "dep:half", "dep:tok
 decoder-wgpu = ["decoder", "burn/wgpu", "dep:wgpu", "dep:pollster"]
 decoder-lora = ["decoder", "model-session"]
 # The autodiff LoRA trainer (v1). `burn/optim` already implies `burn/autodiff`
-# in burn 0.22.0-pre.4 (`optim = ["burn-optim", "autodiff"]`); `burn/autodiff`
+# in burn 0.22.0 (`optim = ["burn-optim", "autodiff"]`); `burn/autodiff`
 # is named here anyway because the trainer's gradients are the contract and a
 # future burn that decouples the two must not silently drop them.
 decoder-autodiff = ["decoder-lora", "burn/autodiff", "burn/optim"]

@@ -116,7 +116,7 @@ fn sentence_on(config: &BertConfig, ids: &[Vec<i32>], dev: &Device) -> Vec<f32> 
     model
         .forward_sentence(input_ids, Pooling::Mean, true)
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
 }
 
@@ -182,8 +182,8 @@ fn bert_sentence_parity_ndarray_wgpu() {
 #[test]
 #[ignore = "requires ESP_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
 fn real_minilm_fixture_wgpu() {
-    let model_dir = std::env::var("ESP_MINILM_DIR")
-        .expect("ESP_MINILM_DIR must point at all-MiniLM-L6-v2");
+    let model_dir =
+        std::env::var("ESP_MINILM_DIR").expect("ESP_MINILM_DIR must point at all-MiniLM-L6-v2");
     let fixture = FIXTURES
         .first()
         .expect("the MiniLM reference fixture must be populated");
@@ -273,7 +273,7 @@ fn timing_bert_cpu_vs_gpu() {
         let _ = model
             .forward_sentence(input, Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let cpu_us = t.elapsed().as_micros();
 
@@ -283,13 +283,13 @@ fn timing_bert_cpu_vs_gpu() {
         let _warm = model
             .forward_sentence(input.clone(), Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let t = std::time::Instant::now();
         let _ = model
             .forward_sentence(input, Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let gpu_us = t.elapsed().as_micros();
 

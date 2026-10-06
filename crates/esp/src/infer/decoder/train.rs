@@ -184,7 +184,7 @@ impl Objective<'_> {
                 0,
             )
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("decoder logits are dense f32");
         let (vocab, seq) = (self.config.vocab_size, self.seq);
         let mut loss = 0.0f64;

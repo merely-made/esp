@@ -120,7 +120,7 @@ mod tests {
         let bytes = f32_bytes(&values);
         let view = make_view(Dtype::F32, vec![4], &bytes);
         let t: Tensor<1> = extract_1d(&view, 4, &device).unwrap();
-        let out = t.into_data().to_vec::<f32>().unwrap();
+        let out = t.into_data().try_to_vec::<f32>().unwrap();
         assert_eq!(out, values);
     }
 
@@ -132,7 +132,7 @@ mod tests {
         let bytes = f32_bytes(&values);
         let view = make_view(Dtype::F32, vec![2, 3], &bytes);
         let t: Tensor<2> = extract_2d(&view, 2, 3, &device).unwrap();
-        let out = t.into_data().to_vec::<f32>().unwrap();
+        let out = t.into_data().try_to_vec::<f32>().unwrap();
         assert_eq!(out, values);
     }
 
@@ -164,7 +164,7 @@ mod tests {
             .collect::<Vec<_>>();
         let view = make_view(Dtype::F16, vec![4], &raw_bytes);
         let tensor = extract_1d(&view, 4, &device).unwrap();
-        assert_eq!(tensor.into_data().to_vec::<f32>().unwrap(), expected);
+        assert_eq!(tensor.into_data().try_to_vec::<f32>().unwrap(), expected);
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod tests {
         let view = make_view(Dtype::F32, vec![16, 8], &bytes);
         let t: Tensor<2> = extract_2d(&view, 16, 8, &device).unwrap();
         assert_eq!(t.dims(), [16, 8]);
-        let back = t.into_data().to_vec::<f32>().unwrap();
+        let back = t.into_data().try_to_vec::<f32>().unwrap();
         assert_eq!(back, values);
     }
 

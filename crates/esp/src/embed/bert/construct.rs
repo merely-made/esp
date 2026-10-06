@@ -74,7 +74,7 @@ mod tests {
         // Forward y = x @ W + b. x = [1.0, 2.0] → y = [1+0.5, 2+0.5, 0+0.5]
         let x = Tensor::<2>::from_data([[1.0, 2.0]], &device);
         let y = linear.forward(x);
-        let v = y.into_data().to_vec::<f32>().unwrap();
+        let v = y.into_data().try_to_vec::<f32>().unwrap();
         let approx = |a: f32, b: f32| (a - b).abs() < 1.0e-5;
         assert!(approx(v[0], 1.5), "v[0] = {}", v[0]);
         assert!(approx(v[1], 2.5), "v[1] = {}", v[1]);
@@ -98,7 +98,7 @@ mod tests {
         // Look up tokens [0, 2]. Should return [[1, 0], [-1, 0]].
         let ids = Tensor::<2, burn::tensor::Int>::from_data([[0, 2]], &device);
         let out = emb.forward(ids);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         let approx = |a: f32, b: f32| (a - b).abs() < 1.0e-5;
         assert!(approx(v[0], 1.0));
         assert!(approx(v[1], 0.0));
@@ -115,7 +115,7 @@ mod tests {
         let ln = layer_norm_from_loaded(gamma, beta, 1.0e-5, &device);
         let x = Tensor::<2>::from_data([[1.0, 2.0, 3.0, 4.0]], &device);
         let y = ln.forward(x);
-        let v = y.into_data().to_vec::<f32>().unwrap();
+        let v = y.into_data().try_to_vec::<f32>().unwrap();
         // Output should have mean ~0, variance ~1.
         let mean: f32 = v.iter().sum::<f32>() / v.len() as f32;
         assert!(mean.abs() < 1.0e-4, "mean = {}", mean);
@@ -129,7 +129,7 @@ mod tests {
         let ln = layer_norm_from_loaded(gamma, beta, 1.0e-5, &device);
         let x = Tensor::<2>::from_data([[1.0, 2.0, 3.0, 4.0]], &device);
         let y = ln.forward(x);
-        let v = y.into_data().to_vec::<f32>().unwrap();
+        let v = y.into_data().try_to_vec::<f32>().unwrap();
         // With gamma=2, output norm doubles relative to identity LN.
         // Sanity: largest abs value should be ~2x the largest of identity-LN output.
         assert!(v.iter().any(|x| x.abs() > 1.5));
@@ -151,7 +151,7 @@ mod tests {
             &device,
         );
         let y = linear.forward(x);
-        let v = y.into_data().to_vec::<f32>().unwrap();
+        let v = y.into_data().try_to_vec::<f32>().unwrap();
         assert!(v.iter().all(|x| !x.is_nan() && !x.is_infinite()));
     }
 }

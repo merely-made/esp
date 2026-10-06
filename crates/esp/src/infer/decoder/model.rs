@@ -186,7 +186,7 @@ pub(crate) mod tests {
         let a = model
             .logits(ids(&dev), 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(a.len(), 5 * config.vocab_size);
         assert!(a.iter().all(|v| v.is_finite()));
@@ -194,7 +194,7 @@ pub(crate) mod tests {
         let b = model
             .logits(ids(&dev), 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(a, b);
     }
@@ -217,12 +217,12 @@ pub(crate) mod tests {
         let a = tied_model
             .logits(ids(&dev), 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let b = untied_model
             .logits(ids(&dev), 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(a, b, "tied head must equal explicit transposed embedding");
     }

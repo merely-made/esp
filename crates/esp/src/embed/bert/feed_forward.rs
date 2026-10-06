@@ -138,7 +138,7 @@ mod tests {
         let layer: BertIntermediate = BertIntermediate::new(&config(), &device);
         let input = rand([1, 4, 384]);
         let out = layer.forward(input);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         assert!(v.iter().all(|x| !x.is_nan() && !x.is_infinite()));
     }
 }

@@ -209,7 +209,7 @@ mod tests {
         let model: BertModel = BertModel::new(&config(), &device);
         let input = ids(&[&[101, 1023, 2057, 6010, 102]]);
         let out = model.forward_sentence(input, Pooling::Mean, true);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1.0e-4, "norm = {norm}");
     }
@@ -220,7 +220,7 @@ mod tests {
         let model: BertModel = BertModel::new(&config(), &device);
         let input = ids(&[&[101, 1023, 2057, 6010, 102]]);
         let out = model.forward_sentence(input, Pooling::Mean, true);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         assert!(v.iter().all(|x| !x.is_nan() && !x.is_infinite()));
     }
 }

@@ -93,7 +93,7 @@ mod tests {
         let encoder: BertEncoder = BertEncoder::new(&config(), &device);
         let input = rand([1, 16, 384]);
         let out = encoder.forward(input);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         assert!(v.iter().all(|x| !x.is_nan() && !x.is_infinite()));
     }
 }

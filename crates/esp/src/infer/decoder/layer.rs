@@ -156,7 +156,7 @@ mod tests {
         let a = layer
             .forward(x.clone(), &rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(a.len(), 5 * config.hidden_size);
         assert!(a.iter().all(|v| v.is_finite()), "NaN/Inf in layer output");
@@ -164,7 +164,7 @@ mod tests {
         let b = layer
             .forward(x, &rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(a, b, "same input must produce identical output");
     }
@@ -209,7 +209,7 @@ mod tests_wgpu {
         layer
             .forward(x, &rope, 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap()
     }
 

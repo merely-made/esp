@@ -350,7 +350,7 @@ mod tests {
         let input_ids: Tensor<2, Int> = Tensor::from_data([[1, 2, 3, 4, 5]], &device);
         let out = model.forward_tokens(input_ids);
         assert_eq!(out.dims(), [1, 5, cfg.hidden_size]);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         assert!(
             v.iter().all(|x| !x.is_nan() && !x.is_infinite()),
             "BertModel built from LoadedBert produced NaN/Inf — \
@@ -368,7 +368,7 @@ mod tests {
         let input_ids: Tensor<2, Int> = Tensor::from_data([[1, 2, 3, 4, 5]], &device);
         let out = model.forward_sentence(input_ids, crate::embed::bert::model::Pooling::Mean, true);
         assert_eq!(out.dims(), [1, cfg.hidden_size]);
-        let v = out.into_data().to_vec::<f32>().unwrap();
+        let v = out.into_data().try_to_vec::<f32>().unwrap();
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1.0e-4,
@@ -391,12 +391,12 @@ mod tests {
                 true,
             )
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let b = model
             .forward_sentence(input_ids, crate::embed::bert::model::Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         assert_eq!(a, b, "same input must produce identical output");
     }
