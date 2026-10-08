@@ -118,7 +118,7 @@ impl LoraFactorSet {
                     tensor
                         .detach()
                         .into_data()
-                        .to_vec::<f32>()
+                        .try_to_vec::<f32>()
                         .expect("LoRA factors are dense f32"),
                 );
             }
@@ -188,7 +188,7 @@ fn scalar(loss: &Tensor<1>) -> f64 {
         loss.clone()
             .detach()
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("loss is a dense f32 scalar")[0],
     )
 }
@@ -465,7 +465,7 @@ mod tests {
                             .grad(&grads)
                             .expect("every LoRA factor must receive a gradient")
                             .into_data()
-                            .to_vec::<f32>()
+                            .try_to_vec::<f32>()
                             .unwrap(),
                     );
                 }
@@ -514,7 +514,7 @@ mod tests {
                     .val()
                     .detach()
                     .into_data()
-                    .to_vec::<f32>()
+                    .try_to_vec::<f32>()
                     .unwrap(),
                 det_init(rank * in_features, 9000 + layer),
                 "layer {layer} A must start where v0 starts"
@@ -525,7 +525,7 @@ mod tests {
                     .val()
                     .detach()
                     .into_data()
-                    .to_vec::<f32>()
+                    .try_to_vec::<f32>()
                     .unwrap()
                     .iter()
                     .all(|value| *value == 0.0),

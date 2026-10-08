@@ -73,7 +73,7 @@ pub fn cosine_top_k(
     let sim = qn.matmul(cn.swap_dims(0, 1)); // [Q, d] · [d, N] = [Q, N]
     let scores = sim
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("similarity readback is f32");
 
     // Per-query top-k over the read-back row (cheap O(N) vs the matmul above).

@@ -250,7 +250,7 @@ mod tests {
         let model = load_decoder_from_bytes(&config, &bytes, &Device::ndarray()).unwrap();
         let logits = model.logits(ids(), 0);
         assert_eq!(logits.dims(), [1, 5, config.vocab_size]);
-        let v = logits.into_data().to_vec::<f32>().unwrap();
+        let v = logits.into_data().try_to_vec::<f32>().unwrap();
         assert!(v.iter().all(|x| x.is_finite()));
     }
 
@@ -265,12 +265,12 @@ mod tests {
         let a = f32_model
             .logits(ids(), 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let b = bf16_model
             .logits(ids(), 0)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let max_diff = a
             .iter()

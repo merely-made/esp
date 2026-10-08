@@ -260,7 +260,7 @@ mod tests {
         let input = rand_input(2, 16, 384);
         let out = block.forward(input);
         let data = out.into_data();
-        let values = data.to_vec::<f32>().unwrap();
+        let values = data.try_to_vec::<f32>().unwrap();
         assert!(values.iter().all(|x| !x.is_nan()), "produced NaN values");
         assert!(
             values.iter().all(|x| !x.is_infinite()),

@@ -116,7 +116,7 @@ fn sentence_on(config: &BertConfig, ids: &[Vec<i32>], dev: &Device) -> Vec<f32> 
     model
         .forward_sentence(input_ids, Pooling::Mean, true)
         .into_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .unwrap()
 }
 
@@ -130,13 +130,40 @@ fn token_batch(config: &BertConfig, batch: usize, seq: usize) -> Vec<Vec<i32>> {
         .collect()
 }
 
+fn assert_parity_inputs(a: &[f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len(), "parity output lengths differ");
+    assert!(
+        a.iter().chain(b).all(|value| value.is_finite()),
+        "parity output contains a non-finite value"
+    );
+}
+
+#[test]
+fn parity_inputs_accept_finite_equal_lengths() {
+    assert_parity_inputs(&[0.0, -1.0], &[0.0, 1.0]);
+}
+
+#[test]
+fn parity_inputs_reject_non_finite_values_on_either_side() {
+    for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[value], &[0.0])).is_err());
+        assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[0.0], &[value])).is_err());
+    }
+}
+
+#[test]
+fn parity_inputs_reject_unequal_lengths() {
+    assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[0.0], &[])).is_err());
+    assert!(std::panic::catch_unwind(|| assert_parity_inputs(&[], &[0.0])).is_err());
+}
+
 #[test]
 fn bert_sentence_parity_ndarray_wgpu() {
     let cfg = tiny_config();
     let ids = token_batch(&cfg, 3, 5);
     let cpu = sentence_on(&cfg, &ids, &cpu_device());
     let gpu = sentence_on(&cfg, &ids, &gpu_device());
-    assert_eq!(cpu.len(), gpu.len());
+    assert_parity_inputs(&cpu, &gpu);
     let max_diff = cpu
         .iter()
         .zip(&gpu)
@@ -155,8 +182,8 @@ fn bert_sentence_parity_ndarray_wgpu() {
 #[test]
 #[ignore = "requires ESP_MINILM_DIR pointing at a real all-MiniLM-L6-v2 directory"]
 fn real_minilm_fixture_wgpu() {
-    let model_dir = std::env::var("ESP_MINILM_DIR")
-        .expect("ESP_MINILM_DIR must point at all-MiniLM-L6-v2");
+    let model_dir =
+        std::env::var("ESP_MINILM_DIR").expect("ESP_MINILM_DIR must point at all-MiniLM-L6-v2");
     let fixture = FIXTURES
         .first()
         .expect("the MiniLM reference fixture must be populated");
@@ -246,7 +273,7 @@ fn timing_bert_cpu_vs_gpu() {
         let _ = model
             .forward_sentence(input, Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let cpu_us = t.elapsed().as_micros();
 
@@ -256,13 +283,13 @@ fn timing_bert_cpu_vs_gpu() {
         let _warm = model
             .forward_sentence(input.clone(), Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let t = std::time::Instant::now();
         let _ = model
             .forward_sentence(input, Pooling::Mean, true)
             .into_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .unwrap();
         let gpu_us = t.elapsed().as_micros();
 
