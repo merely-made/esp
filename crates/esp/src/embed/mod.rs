@@ -75,3 +75,12 @@ pub use provider::{EmbedError, EmbeddingProvider, SimilarityMetric};
 pub use search::{SearchError, SemanticSearch};
 pub use sparse::{SparseIndex, SparseVector};
 pub use stub::StubEmbeddingProvider;
+
+/// The one manifest of the pinned sentence model (dynamics grammar plan,
+/// F89, "One manifest in ESP"): the model, its published revision, licence,
+/// pooling and prefix, and every artifact's size and hashes
+/// (`meaning_model.json` beside this file, schema `esp.meaning-model/v1`).
+/// Pictograph's Meaning channel reads it through this constant, and
+/// distillery's browser probe reads the file by its path. The weights stay
+/// outside the tree.
+pub const MEANING_MODEL_MANIFEST: &str = include_str!("meaning_model.json");

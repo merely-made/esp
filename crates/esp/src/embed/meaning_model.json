@@ -1,0 +1,38 @@
+{
+  "schema": "esp.meaning-model/v1",
+  "model": {
+    "model_id": "intfloat/e5-base-v2",
+    "revision": "f52bf8ec8c7124536f0efb74aca902b2995e5bcd",
+    "card": "https://huggingface.co/intfloat/e5-base-v2",
+    "license": "MIT",
+    "directory": "e5-base-v2",
+    "architecture": "bert",
+    "pooling": "mean",
+    "prefix": "query: ",
+    "dimensions": 768,
+    "artifacts": {
+      "config": {
+        "file": "config.json",
+        "bytes": 650,
+        "sha256": "01cc39aa39538a8179aa131c8a16adc03b506c92009f091502e4eb0c702f5f78",
+        "git_blob": "24b4776266ab6abf7a9d6672f42b77f06ef77b87"
+      },
+      "tokenizer": {
+        "file": "tokenizer.json",
+        "bytes": 711396,
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "git_blob": "688882a79f44442ddc1f60d70334a7ff5df0fb47"
+      },
+      "weights": {
+        "file": "model.safetensors",
+        "bytes": 437955512,
+        "dtype": "F32",
+        "sha256": "d0d559c47d5f71b1d280b13b62a2657f3e3bc70c0786f9ab91a36545e6a8f693"
+      }
+    },
+    "matched": {
+      "on": "2026-10-04",
+      "how": "The local files were hashed and compared with the revision's published file listing (api/models/intfloat/e5-base-v2/revision/f52bf8ec...?blobs=true): the weights by their LFS SHA-256, config and tokenizer by their git blob ids. All three match, and the revision is the repository's main. The revision's 1_Pooling/config.json sets mean pooling; the card asks for the query: prefix. No weights were downloaded."
+    }
+  }
+}
