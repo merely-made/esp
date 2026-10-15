@@ -276,6 +276,31 @@ pub fn train_peft_lora_autodiff(
     settings: &AutodiffLoraSettings,
     device: &Device,
 ) -> Result<TrainedLoraAdapter, InferError> {
+    train_peft_lora_autodiff_controlled(
+        config_bytes,
+        tokenizer_bytes,
+        base_weights,
+        model_id,
+        cases,
+        settings,
+        device,
+        &mut || Ok(()),
+    )
+}
+
+/// Cooperative trainer. Checks between bounded tensor operations; cancellation
+/// drops all local model tensors before returning to the lease owner.
+pub fn train_peft_lora_autodiff_controlled(
+    config_bytes: &[u8],
+    tokenizer_bytes: &[u8],
+    base_weights: &[u8],
+    model_id: &str,
+    cases: &[TrainingCase],
+    settings: &AutodiffLoraSettings,
+    device: &Device,
+    check: &mut dyn FnMut() -> Result<(), InferError>,
+) -> Result<TrainedLoraAdapter, InferError> {
+    check()?;
     settings.validate()?;
     if cases.is_empty() {
         return Err(InferError::InvalidRequest(
@@ -316,6 +341,7 @@ pub fn train_peft_lora_autodiff(
 
     let mut initial_loss = 0.0f64;
     for step in 0..settings.steps {
+        check()?;
         let model = compose_model(&config, &base, &factors, settings, &train_device);
         let loss = batch_loss(&model, &batch);
         if step == 0 {

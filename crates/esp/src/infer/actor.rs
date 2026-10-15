@@ -140,25 +140,34 @@ where
                 .as_ref()
                 .map_err(Clone::clone)
                 .and_then(|provider| {
-                    provider.generate_streaming(&request, &mut |fragment| {
-                        // Drain commands mid-stream so a Cancel can land while
-                        // tokens flow; other commands queue for later.
-                        loop {
-                            match commands.try_recv() {
-                                Ok(c) => absorb(c, &mut pending, &mut cancelled),
-                                Err(_) => break,
+                    provider.generate_streaming_controlled(
+                        &request,
+                        &mut |fragment| {
+                            streamed.emit(InferUpdate::Fragment {
+                                id,
+                                text: fragment.to_string(),
+                            });
+                            ControlFlow::Continue(())
+                        },
+                        &mut || {
+                            if was_cancelled {
+                                return true;
                             }
-                        }
-                        if cancelled.remove(&id) {
-                            was_cancelled = true;
-                            return ControlFlow::Break(());
-                        }
-                        streamed.emit(InferUpdate::Fragment {
-                            id,
-                            text: fragment.to_string(),
-                        });
-                        ControlFlow::Continue(())
-                    })
+                            // Drain commands mid-stream so a Cancel can land while
+                            // tokens flow; other commands queue for later.
+                            loop {
+                                match commands.try_recv() {
+                                    Ok(c) => absorb(c, &mut pending, &mut cancelled),
+                                    Err(_) => break,
+                                }
+                            }
+                            if cancelled.remove(&id) {
+                                was_cancelled = true;
+                                return true;
+                            }
+                            false
+                        },
+                    )
                 });
             match (was_cancelled, result) {
                 (true, _) => out.emit(InferUpdate::Cancelled { id }),

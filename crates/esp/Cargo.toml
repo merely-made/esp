@@ -55,7 +55,7 @@ pollster = "0.4"
 async-trait = "0.1"
 eidetic = { path = "../../eidetic/eidetic-core", version = "0.0.2" }
 eidetic-search = { workspace = true }
-muniment = { path = "../../eidetic/muniment", version = "0.1.1" }
+muniment = { path = "../../eidetic/muniment", version = "0.1.1", features = ["redb"] }
 sha2 = { workspace = true }
 tempfile = "3"
 

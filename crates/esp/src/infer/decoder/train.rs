@@ -218,6 +218,31 @@ pub fn train_peft_lora(
     settings: &LoraTrainerSettings,
     device: &Device,
 ) -> Result<TrainedLoraAdapter, InferError> {
+    train_peft_lora_controlled(
+        config_bytes,
+        tokenizer_bytes,
+        base_weights,
+        model_id,
+        cases,
+        settings,
+        device,
+        &mut || Ok(()),
+    )
+}
+
+/// Cooperative trainer. Checks between bounded tensor operations; cancellation
+/// drops all local model tensors before returning to the lease owner.
+pub fn train_peft_lora_controlled(
+    config_bytes: &[u8],
+    tokenizer_bytes: &[u8],
+    base_weights: &[u8],
+    model_id: &str,
+    cases: &[TrainingCase],
+    settings: &LoraTrainerSettings,
+    device: &Device,
+    check: &mut dyn FnMut() -> Result<(), InferError>,
+) -> Result<TrainedLoraAdapter, InferError> {
+    check()?;
     settings.validate()?;
     if cases.is_empty() {
         return Err(InferError::InvalidRequest(
@@ -283,8 +308,10 @@ pub fn train_peft_lora(
     let mut current_loss = initial_loss;
     let mut step_length = settings.initial_step_length;
     for step in 0..settings.steps {
+        check()?;
         let mut gradient = vec![0.0f32; params.len()];
         for j in 0..params.len() {
+            check()?;
             let original = params[j];
             params[j] = original + settings.epsilon;
             let plus = objective.loss(&params);
@@ -305,6 +332,7 @@ pub fn train_peft_lora(
         }
         let mut trial = step_length * 2.0;
         while trial >= settings.minimum_step_length {
+            check()?;
             let candidate: Vec<f32> = params
                 .iter()
                 .zip(gradient.iter())
