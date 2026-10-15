@@ -36,6 +36,7 @@ pub struct DecoderProvider {
     model: DecoderModel,
     tokenizer: Tokenizer,
     capability: ModelCapability,
+    add_special_tokens: bool,
 }
 
 /// Decoder-specific details that the portable [`InferenceProvider`] seam does
@@ -66,6 +67,7 @@ struct StreamObserver<'a> {
     emitted: String,
     emitted_fragments: usize,
     stopped_by_callback: bool,
+    stopped_by_string: bool,
     decode_error: Option<InferError>,
 }
 
@@ -85,6 +87,7 @@ impl<'a> StreamObserver<'a> {
             emitted: String::new(),
             emitted_fragments: 0,
             stopped_by_callback: false,
+            stopped_by_string: false,
             decode_error: None,
         }
     }
@@ -104,31 +107,61 @@ impl<'a> StreamObserver<'a> {
         if !full.starts_with(&self.emitted) || full.len() == self.emitted.len() {
             return ControlFlow::Continue(());
         }
-        if self
+        let stop_at = self
             .request
             .stop
             .iter()
-            .any(|stop| full.contains(stop.as_str()))
-        {
-            // Truncate before the completing fragment, like
-            // StubInferenceProvider: nothing past the stop is emitted.
-            return ControlFlow::Break(());
+            .filter(|stop| !stop.is_empty())
+            .filter_map(|stop| full.find(stop))
+            .min();
+        self.stopped_by_string = stop_at.is_some();
+        // Hold a suffix which could become a stop across later fragments.
+        // Every prefix length is a UTF-8 boundary; content is never sliced
+        // through a character.
+        let withheld = self
+            .request
+            .stop
+            .iter()
+            .flat_map(|stop| {
+                stop.char_indices()
+                    .map(|(index, _)| index)
+                    .filter(|index| *index > 0)
+                    .filter(|index| full.ends_with(&stop[..*index]))
+            })
+            .max()
+            .unwrap_or(0);
+        let end = stop_at.unwrap_or(full.len() - withheld);
+        if end > self.emitted.len() {
+            let delta = &full[self.emitted.len()..end];
+            self.stopped_by_callback = (self.on_fragment)(delta).is_break();
+            self.emitted_fragments += 1;
+            self.emitted = full[..end].to_string();
         }
-        let delta = full[self.emitted.len()..].to_string();
-        let flow = (self.on_fragment)(&delta);
-        self.emitted_fragments += 1;
-        self.emitted = full;
-        self.stopped_by_callback = flow.is_break();
-        flow
+        if self.stopped_by_callback || self.stopped_by_string {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     }
 
     fn finish(
-        self,
+        mut self,
         token_ids: Vec<u32>,
         cooperatively_cancelled: bool,
     ) -> Result<DecoderGeneration, InferError> {
         if let Some(error) = self.decode_error {
             return Err(error);
+        }
+        // At a normal token limit an incomplete stop prefix is ordinary text.
+        // A cancellation never flushes held bytes after the stop boundary.
+        if !self.stopped_by_callback && !self.stopped_by_string && !cooperatively_cancelled {
+            let full = self.provider.decode(&self.generated_ids)?;
+            if full.starts_with(&self.emitted) && full.len() > self.emitted.len() {
+                self.stopped_by_callback =
+                    (self.on_fragment)(&full[self.emitted.len()..]).is_break();
+                self.emitted_fragments += 1;
+                self.emitted = full;
+            }
         }
         Ok(DecoderGeneration {
             text: self.emitted,
@@ -159,7 +192,15 @@ impl DecoderProvider {
             model,
             tokenizer,
             capability,
+            add_special_tokens: true,
         }
+    }
+
+    /// The declared template owns BOS/EOS and role tokens. Disable tokenizer
+    /// postprocessing so it cannot silently prepend a second BOS.
+    pub fn with_literal_prompt(mut self) -> Self {
+        self.add_special_tokens = false;
+        self
     }
 
     /// Build from the HF artifact triple as byte buffers — the shape
@@ -189,7 +230,7 @@ impl DecoderProvider {
         }
         let encoding = self
             .tokenizer
-            .encode(rendered_prompt, true)
+            .encode(rendered_prompt, self.add_special_tokens)
             .map_err(|error| InferError::InvalidRequest(format!("tokenize: {error}")))?;
         let prompt_ids = encoding.get_ids();
         if prompt_ids.len() > self.capability.context_window {
@@ -216,7 +257,9 @@ impl DecoderProvider {
 
     fn decode(&self, ids: &[u32]) -> Result<String, InferError> {
         self.tokenizer
-            .decode(ids, true)
+            // A declared template's stop strings can themselves be special
+            // tokens. Keep them visible to the stop matcher in literal mode.
+            .decode(ids, self.add_special_tokens)
             .map_err(|e| InferError::Backend(format!("detokenize: {e}")))
     }
 
@@ -251,7 +294,7 @@ impl DecoderProvider {
 
         let encoding = self
             .tokenizer
-            .encode(request.prompt.as_str(), true)
+            .encode(request.prompt.as_str(), self.add_special_tokens)
             .map_err(|e| InferError::InvalidRequest(format!("tokenize: {e}")))?;
         let prompt_ids = encoding.get_ids().to_vec();
         let window = self.capability.context_window;
@@ -387,6 +430,43 @@ mod tests {
             prompt: prompt.to_string(),
             max_tokens,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stop_across_fragments_never_leaks_its_prefix() {
+        let provider = provider();
+        let mut request = request("t1", 4);
+        request.stop = vec!["t1 t2".into()];
+        let mut text = String::new();
+        let mut sink = |fragment: &str| {
+            text.push_str(fragment);
+            ControlFlow::Continue(())
+        };
+        let mut token = |_| {};
+        let mut observer = StreamObserver::new(&provider, &request, &mut sink, &mut token);
+        assert!(observer.observe(1).is_continue());
+        assert!(observer.observe(2).is_break());
+        assert_eq!(observer.finish(vec![1, 2], false).unwrap().text, "");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn a_normal_limit_flushes_an_incomplete_stop_but_cancellation_does_not() {
+        let provider = provider();
+        let mut request = request("t1", 4);
+        request.stop = vec!["t1 t2".into()];
+        for cancelled in [false, true] {
+            let mut text = String::new();
+            let mut sink = |fragment: &str| {
+                text.push_str(fragment);
+                ControlFlow::Continue(())
+            };
+            let mut token = |_| {};
+            let mut observer = StreamObserver::new(&provider, &request, &mut sink, &mut token);
+            assert!(observer.observe(1).is_continue());
+            observer.finish(vec![1], cancelled).unwrap();
+            assert_eq!(text, if cancelled { "" } else { "t1" });
         }
     }
 

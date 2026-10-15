@@ -1,0 +1,11 @@
+{
+  "schema": "esp.prompt-template/v1",
+  "bos": "",
+  "eos": "<|im_end|>",
+  "system": {"prefix": "<|im_start|>system\n", "suffix": "<|im_end|>\n"},
+  "user": {"prefix": "<|im_start|>user\n", "suffix": "<|im_end|>\n"},
+  "assistant": {"prefix": "<|im_start|>assistant\n", "suffix": ""},
+  "system_prompt": "You are a helpful AI assistant named SmolLM, trained by Hugging Face",
+  "context": {"prefix": "Context:\n", "suffix": "\n\n"},
+  "stop": ["<|im_end|>"]
+}

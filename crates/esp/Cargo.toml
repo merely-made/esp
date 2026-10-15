@@ -82,3 +82,7 @@ index-burn-wgpu = ["index-burn", "burn/wgpu"]
 bert = ["dep:burn", "dep:tokenizers", "dep:safetensors", "dep:serde_json", "dep:half", "dep:getrandom"]
 bert-wgpu = ["bert", "burn/wgpu"]
 bert-validation = ["bert"]
+
+[[example]]
+name = "import_inference_model"
+required-features = ["decoder", "model-session"]

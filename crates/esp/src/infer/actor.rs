@@ -50,6 +50,12 @@ pub enum InferUpdate {
     /// The provider is loaded and ready; sent once at actor startup so
     /// status surfaces can show the real capability, not a guess.
     Ready { capability: ModelCapability },
+    /// Exact session used by this actor, emitted before it takes any ask.
+    Session {
+        identity: super::provider::SessionIdentity,
+    },
+    /// Provider construction failed. No Ready is emitted for this actor.
+    LoadFailed { error: InferError },
     /// Generation `id` began.
     Started { id: u64 },
     /// One streamed fragment of generation `id`, in production order.
@@ -72,11 +78,33 @@ pub fn spawn_inference_actor<F>(
 where
     F: FnOnce() -> Box<dyn InferenceProvider> + Send + 'static,
 {
+    spawn_inference_actor_fallible(wake, move || Ok(build()))
+}
+
+/// Fallible model construction on the actor thread. A load failure is visible
+/// immediately and every queued ask fails with that error, without a fallback.
+pub fn spawn_inference_actor_fallible<F>(
+    wake: Wake,
+    build: F,
+) -> (ActorHandle<InferCommand>, Receiver<InferUpdate>)
+where
+    F: FnOnce() -> Result<Box<dyn InferenceProvider>, InferError> + Send + 'static,
+{
     spawn_named::<InferCommand, InferUpdate, _>("infer", wake, move |commands, out| {
         let provider = build();
-        out.emit(InferUpdate::Ready {
-            capability: provider.capability().clone(),
-        });
+        match &provider {
+            Ok(provider) => {
+                if let Some(identity) = provider.session_identity() {
+                    out.emit(InferUpdate::Session { identity });
+                }
+                out.emit(InferUpdate::Ready {
+                    capability: provider.capability().clone(),
+                });
+            },
+            Err(error) => out.emit(InferUpdate::LoadFailed {
+                error: error.clone(),
+            }),
+        }
 
         let mut pending: VecDeque<(u64, GenerationRequest)> = VecDeque::new();
         let mut cancelled: HashSet<u64> = HashSet::new();
@@ -108,25 +136,30 @@ where
             out.emit(InferUpdate::Started { id });
             let streamed = out.clone();
             let mut was_cancelled = false;
-            let result = provider.generate_streaming(&request, &mut |fragment| {
-                // Drain commands mid-stream so a Cancel can land while
-                // tokens flow; other commands queue for later.
-                loop {
-                    match commands.try_recv() {
-                        Ok(c) => absorb(c, &mut pending, &mut cancelled),
-                        Err(_) => break,
-                    }
-                }
-                if cancelled.remove(&id) {
-                    was_cancelled = true;
-                    return ControlFlow::Break(());
-                }
-                streamed.emit(InferUpdate::Fragment {
-                    id,
-                    text: fragment.to_string(),
+            let result = provider
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|provider| {
+                    provider.generate_streaming(&request, &mut |fragment| {
+                        // Drain commands mid-stream so a Cancel can land while
+                        // tokens flow; other commands queue for later.
+                        loop {
+                            match commands.try_recv() {
+                                Ok(c) => absorb(c, &mut pending, &mut cancelled),
+                                Err(_) => break,
+                            }
+                        }
+                        if cancelled.remove(&id) {
+                            was_cancelled = true;
+                            return ControlFlow::Break(());
+                        }
+                        streamed.emit(InferUpdate::Fragment {
+                            id,
+                            text: fragment.to_string(),
+                        });
+                        ControlFlow::Continue(())
+                    })
                 });
-                ControlFlow::Continue(())
-            });
             match (was_cancelled, result) {
                 (true, _) => out.emit(InferUpdate::Cancelled { id }),
                 (false, Ok(text)) => out.emit(InferUpdate::Finished { id, text }),
@@ -158,6 +191,40 @@ mod tests {
 
     fn no_wake() -> Wake {
         Arc::new(|| {})
+    }
+
+    #[test]
+    fn load_failure_never_announces_ready_or_falls_back() {
+        let failure = InferError::InvalidConfig("missing template".into());
+        let expected = failure.clone();
+        let (handle, updates) = spawn_inference_actor_fallible(no_wake(), move || Err(failure));
+        for id in 0..2 {
+            handle.command(InferCommand::Generate {
+                id,
+                request: GenerationRequest {
+                    prompt: "ask".into(),
+                    ..Default::default()
+                },
+            });
+        }
+        handle.join();
+        let got: Vec<_> = updates.iter().collect();
+        assert_eq!(
+            got[0],
+            InferUpdate::LoadFailed {
+                error: expected.clone()
+            }
+        );
+        assert!(!got.iter().any(|update| matches!(
+            update,
+            InferUpdate::Ready { .. } | InferUpdate::Finished { .. }
+        )));
+        for id in 0..2 {
+            assert!(got.contains(&InferUpdate::Failed {
+                id,
+                error: expected.clone()
+            }));
+        }
     }
 
     #[test]
