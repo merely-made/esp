@@ -42,6 +42,11 @@ to the immutable model session. The local import example, pinned SmolLM2 row,
 independent-reference reproduction and resident qualification are recorded in
 the [resident inference plan](../../../design_docs/mere_docs/implementation_strategy/2026-10-15_resident_inference_and_recall_plan.md).
 
+Providers expose cooperative cancellation separately from text fragments, so
+a host can cancel a device wait before generation starts. The LoRA trainer
+arms also expose controlled entry points that check cancellation between
+bounded tensor operations; the original entry points retain their behavior.
+
 The `actor` feature compiles for wasm, but its Armillary thread actor requires
 a host executor at runtime. See the
 [feature and target matrix](design_docs/2026-08-09_feature_target_matrix.md)

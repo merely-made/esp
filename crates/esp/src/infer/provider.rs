@@ -148,6 +148,26 @@ pub struct SessionIdentity {
 /// surfaces it is the caller's choice). Callers that only want the final text
 /// use [`generate`](Self::generate).
 pub trait InferenceProvider: Send + Sync {
+    /// Cooperative entry point for providers that may wait for device access.
+    /// The default preserves existing providers' fragment cancellation.
+    fn generate_streaming_controlled(
+        &self,
+        request: &GenerationRequest,
+        on_token: &mut dyn FnMut(&str) -> std::ops::ControlFlow<()>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<String, InferError> {
+        if cancelled() {
+            return Ok(String::new());
+        }
+        self.generate_streaming(request, &mut |fragment| {
+            if cancelled() {
+                std::ops::ControlFlow::Break(())
+            } else {
+                on_token(fragment)
+            }
+        })
+    }
+
     /// Exact session provenance, absent for unbound providers such as the stub.
     fn session_identity(&self) -> Option<SessionIdentity> {
         None

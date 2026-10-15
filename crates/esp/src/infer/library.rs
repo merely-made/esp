@@ -8,7 +8,7 @@
 
 use super::decoder::{DecoderDevice, DecoderProvider};
 use super::prompt::{PromptTemplate, SessionProvider};
-use super::{BoundModelSession, InferError, InferenceProvider, ModelSession};
+use super::{BoundModelSession, InferError, ModelSession};
 use eidetic::typed::{TypedPayload, load_typed};
 use eidetic::{ManifestId, ModelLibrary, NoFetcher, SchemaRef, Store};
 use serde::{Deserialize, Serialize};
@@ -88,9 +88,37 @@ pub async fn resolve_library_session(
 }
 
 impl ResolvedInferenceRow {
+    /// Exact identity before a deferred device load. The decoder currently
+    /// accepts only unquantized model weights.
+    pub fn session(&self, loader: &str) -> ModelSession {
+        ModelSession {
+            base_model_ref: self.model_ref,
+            model_id: self.model.manifest.model_id.clone(),
+            tokenizer_ref: self.model.manifest.tokenizer_blob,
+            prompt_template_hash: eidetic::Hash::of(&self.template_bytes),
+            quantization: None,
+            loader: loader.into(),
+            adapters: Vec::new(),
+        }
+    }
+
+    /// Declared capability for a deferred loader. Tensor shape validation still
+    /// occurs at device load; the host must surface that call's failures.
+    pub fn capability(&self, loader: &str) -> Result<super::ModelCapability, InferError> {
+        let config =
+            super::decoder::DecoderConfig::from_json_bytes(&self.model.components.config_bytes)?;
+        Ok(super::ModelCapability {
+            model_id: self.model.manifest.model_id.clone(),
+            context_window: config.max_position_embeddings,
+            quantization: None,
+            loader: loader.into(),
+            streaming: true,
+        })
+    }
+
     /// Load on the caller-selected device, with the library borrow released.
     pub fn load(
-        self,
+        &self,
         device: &DecoderDevice,
         loader: &str,
         max_tokens: usize,
@@ -104,18 +132,10 @@ impl ResolvedInferenceRow {
             device,
         )?
         .with_literal_prompt();
-        let session = ModelSession {
-            base_model_ref: self.model_ref,
-            model_id: self.model.manifest.model_id,
-            tokenizer_ref: self.model.manifest.tokenizer_blob,
-            prompt_template_hash: eidetic::Hash::of(&self.template_bytes),
-            quantization: provider.capability().quantization.clone(),
-            loader: loader.into(),
-            adapters: Vec::new(),
-        };
+        let session = self.session(loader);
         SessionProvider::new(
             BoundModelSession::bind(session, provider)?,
-            self.template_bytes,
+            self.template_bytes.clone(),
             max_tokens,
         )
     }

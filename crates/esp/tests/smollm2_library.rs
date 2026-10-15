@@ -31,6 +31,30 @@ fn save<T: TypedPayload>(store: &mut dyn eidetic::Store, value: &T) -> ManifestI
 #[test]
 #[ignore = "requires ESP_SMOLLM2_DIR with pinned 724MB checkpoint; run in release mode"]
 fn library_cpu_matches_independent_greedy_reference() {
+    library_matches_reference(
+        DecoderDevice::ndarray(),
+        "burn-ndarray",
+        serde_json::Value::Null,
+    );
+}
+
+#[cfg(feature = "decoder-wgpu")]
+#[test]
+#[ignore = "requires pinned ESP_SMOLLM2_DIR and a discrete GPU"]
+fn library_gpu_matches_independent_greedy_reference() {
+    use esp::infer::decoder::{DecoderGpuKind, GpuDeviceType, probe_gpu_adapter};
+    let kind = DecoderGpuKind::DiscreteGpu(0);
+    let adapter = probe_gpu_adapter(kind.clone()).unwrap();
+    assert_eq!(adapter.device_type, GpuDeviceType::Discrete);
+    assert!(adapter.matched_requested_class);
+    library_matches_reference(
+        DecoderDevice::wgpu(kind),
+        "burn-wgpu",
+        serde_json::to_value(adapter).unwrap(),
+    );
+}
+
+fn library_matches_reference(device: DecoderDevice, loader: &str, adapter: serde_json::Value) {
     let directory = PathBuf::from(std::env::var_os("ESP_SMOLLM2_DIR").expect("ESP_SMOLLM2_DIR"));
     let reference: serde_json::Value =
         serde_json::from_slice(include_bytes!("smollm2_360m_reference.json")).unwrap();
@@ -81,14 +105,8 @@ fn library_cpu_matches_independent_greedy_reference() {
         },
     );
     let start = Instant::now();
-    let provider = pollster::block_on(load_library_session(
-        &mut store,
-        row,
-        &DecoderDevice::ndarray(),
-        "burn-ndarray",
-        16,
-    ))
-    .unwrap();
+    let provider =
+        pollster::block_on(load_library_session(&mut store, row, &device, loader, 16)).unwrap();
     let load_seconds = start.elapsed().as_secs_f64();
     // The store is not needed during generation.
     drop(store);
@@ -131,7 +149,7 @@ fn library_cpu_matches_independent_greedy_reference() {
         );
         rows.push(serde_json::json!({"question": question, "token_ids": generated.token_ids, "text": generated.text, "seconds": seconds}));
     }
-    let receipt = serde_json::json!({"backend": "burn-ndarray", "model": reference["model_id"], "revision": reference["revision"],
+    let receipt = serde_json::json!({"backend": loader, "adapter": adapter, "model": reference["model_id"], "revision": reference["revision"],
         "row": row, "session": identity, "load_seconds": load_seconds, "rows": rows});
     println!("{receipt}");
     if let Some(path) = std::env::var_os("ESP_INFERENCE_RECEIPT") {
