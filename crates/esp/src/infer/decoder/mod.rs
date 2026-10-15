@@ -7,11 +7,11 @@
 //! The own llama-family decoder body (inference plan P1).
 //!
 //! HF-config-driven: [`config::DecoderConfig`] parses a HuggingFace
-//! `config.json` directly, so one body runs the open llama-family class
-//! (TinyLlama, Llama 3.2, SmolLM) from the standard artifact triple
-//! (`config.json` / `tokenizer.json` / `model.safetensors`) — the same
-//! triple `embed`'s BERT uses, and the byte shape the eidetic model
-//! corridor stores.
+//! `config.json` directly, so one body runs the Llama block (TinyLlama,
+//! SmolLM2) from the standard artifact triple (`config.json` /
+//! `tokenizer.json` / `model.safetensors`) — the same triple `embed`'s BERT
+//! uses, and the byte shape the eidetic model corridor stores. Configs and
+//! checkpoints outside that block are refused by name; see [`config`].
 //!
 //! Built from burn-nn primitives (`RmsNorm`, `RotaryEncoding`, `SwiGlu`)
 //! against the workspace burn pin; the GQA attention wiring in

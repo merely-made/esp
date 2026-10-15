@@ -13,6 +13,8 @@
 //! eidetic corridor's `ModelComponents.weight_bytes` feeds this directly
 //! (P2), and a file path is just `std::fs::read` above it.
 
+use std::collections::HashSet;
+
 use safetensors::SafeTensors;
 use safetensors::tensor::TensorView;
 
@@ -30,6 +32,80 @@ fn view<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>, 
         .map_err(|_| InferError::InvalidWeights(format!("missing tensor: {name}")))
 }
 
+/// The per-layer tensors the Llama block consumes, under
+/// `model.layers.{i}.`; the loader below reads exactly these.
+const LAYER_TENSORS: [&str; 9] = [
+    "input_layernorm.weight",
+    "self_attn.q_proj.weight",
+    "self_attn.k_proj.weight",
+    "self_attn.v_proj.weight",
+    "self_attn.o_proj.weight",
+    "post_attention_layernorm.weight",
+    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight",
+    "mlp.down_proj.weight",
+];
+
+/// Older checkpoints store RoPE's inverse frequencies as a buffer. They are
+/// derived from `rope_theta`, which the config already supplies, and a
+/// scaled variant is refused at the config.
+fn ignorable(name: &str) -> bool {
+    name.ends_with(".rotary_emb.inv_freq")
+}
+
+fn why_unconsumed(name: &str) -> &'static str {
+    if name.ends_with(".bias") {
+        "bias terms are not implemented"
+    } else if name.contains("q_norm") || name.contains("k_norm") {
+        "per-head QK-norm is not implemented"
+    } else if name.contains("experts")
+        || name.contains("block_sparse_moe")
+        || name.ends_with(".mlp.gate.weight")
+    {
+        "mixture-of-experts layers are not implemented"
+    } else if name.contains("norm") {
+        "normalization layers beyond the Llama block's two per layer are not implemented"
+    } else {
+        "the Llama-block decoder does not consume this tensor"
+    }
+}
+
+/// Refuse a checkpoint carrying tensors the decoder would not read. An
+/// unread bias, norm or expert weight means the checkpoint computes
+/// something this decoder does not, so loading it would answer wrongly.
+fn refuse_unconsumed(config: &DecoderConfig, tensors: &SafeTensors<'_>) -> Result<(), InferError> {
+    let mut consumed: HashSet<String> = [
+        "model.embed_tokens.weight",
+        "model.norm.weight",
+        "lm_head.weight",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    for i in 0..config.num_hidden_layers {
+        for suffix in LAYER_TENSORS {
+            consumed.insert(format!("model.layers.{i}.{suffix}"));
+        }
+    }
+    let mut unconsumed: Vec<&String> = tensors
+        .names()
+        .into_iter()
+        .filter(|name| !consumed.contains(name.as_str()) && !ignorable(name))
+        .collect();
+    unconsumed.sort();
+    match unconsumed.first() {
+        None => Ok(()),
+        Some(first) => Err(InferError::Unsupported {
+            feature: format!("tensor {first}"),
+            detail: format!(
+                "{}; {} unconsumed tensor(s) in this checkpoint",
+                why_unconsumed(first),
+                unconsumed.len()
+            ),
+        }),
+    }
+}
+
 /// Decode HF `model.safetensors` bytes into resident decoder tensors.
 ///
 /// `lm_head.weight` may be absent when `config.tie_word_embeddings` is
@@ -42,6 +118,7 @@ pub(crate) fn load_decoder_tensors_from_bytes(
 ) -> Result<LoadedDecoder, InferError> {
     let tensors = SafeTensors::deserialize(weights)
         .map_err(|e| InferError::InvalidWeights(format!("safetensors parse: {e}")))?;
+    refuse_unconsumed(config, &tensors)?;
 
     let h = config.hidden_size;
     let kv = config.kv_heads() * config.head_dim();
@@ -295,6 +372,78 @@ mod tests {
         let bytes = serialize_f32(&tiny_tensor_table(&config, false));
         let err = load_decoder_from_bytes(&config, &bytes, &Device::ndarray()).unwrap_err();
         assert!(matches!(err, InferError::InvalidWeights(_)));
+    }
+
+    /// Load the tiny checkpoint with one extra tensor and return the refused
+    /// feature.
+    fn refused_with_extra(name: &str, shape: Vec<usize>) -> String {
+        let config = tiny_config();
+        let mut table = tiny_tensor_table(&config, true);
+        let n = shape.iter().product();
+        table.push((name.to_string(), shape, det_vec(n, 3)));
+        match load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray()) {
+            Err(InferError::Unsupported { feature, .. }) => feature,
+            Err(other) => panic!("expected Unsupported, got {other:?}"),
+            Ok(_) => panic!("expected Unsupported, got a model"),
+        }
+    }
+
+    #[test]
+    fn attention_bias_tensor_refused() {
+        // Qwen2 and 2.5 carry these; ignoring them answers wrongly.
+        let name = "model.layers.0.self_attn.q_proj.bias";
+        assert_eq!(refused_with_extra(name, vec![8]), format!("tensor {name}"));
+    }
+
+    #[test]
+    fn mlp_bias_tensor_refused() {
+        let name = "model.layers.1.mlp.down_proj.bias";
+        assert_eq!(refused_with_extra(name, vec![8]), format!("tensor {name}"));
+    }
+
+    #[test]
+    fn qk_norm_tensor_refused() {
+        // Qwen3 8B and 14B pass the shape checks but carry these.
+        let name = "model.layers.0.self_attn.q_norm.weight";
+        assert_eq!(refused_with_extra(name, vec![2]), format!("tensor {name}"));
+    }
+
+    #[test]
+    fn expert_tensor_refused() {
+        let name = "model.layers.0.block_sparse_moe.experts.0.w1.weight";
+        assert_eq!(
+            refused_with_extra(name, vec![16, 8]),
+            format!("tensor {name}")
+        );
+    }
+
+    #[test]
+    fn extra_norm_tensor_refused() {
+        // Gemma 2 and 3 add norms around the MLP.
+        let name = "model.layers.0.pre_feedforward_layernorm.weight";
+        assert_eq!(refused_with_extra(name, vec![8]), format!("tensor {name}"));
+    }
+
+    #[test]
+    fn layer_beyond_config_refused() {
+        // A checkpoint deeper than its config would silently drop layers.
+        let name = "model.layers.2.mlp.up_proj.weight";
+        assert_eq!(
+            refused_with_extra(name, vec![16, 8]),
+            format!("tensor {name}")
+        );
+    }
+
+    #[test]
+    fn rope_inv_freq_buffer_is_tolerated() {
+        let config = tiny_config();
+        let mut table = tiny_tensor_table(&config, true);
+        table.push((
+            "model.layers.0.self_attn.rotary_emb.inv_freq".to_string(),
+            vec![1],
+            vec![1.0],
+        ));
+        load_decoder_from_bytes(&config, &serialize_f32(&table), &Device::ndarray()).unwrap();
     }
 
     #[test]
