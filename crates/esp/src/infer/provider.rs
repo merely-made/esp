@@ -103,6 +103,11 @@ pub enum InferError {
     InvalidConfig(String),
     /// Model weights were missing, malformed, or shape-mismatched.
     InvalidWeights(String),
+    /// The model uses an architecture or feature this provider does not
+    /// implement. `feature` names the config field or tensor. Loading is
+    /// refused rather than running a computation other than the one the
+    /// checkpoint was trained for.
+    Unsupported { feature: String, detail: String },
 }
 
 impl std::fmt::Display for InferError {
@@ -116,6 +121,9 @@ impl std::fmt::Display for InferError {
             InferError::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
             InferError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             InferError::InvalidWeights(msg) => write!(f, "invalid weights: {msg}"),
+            InferError::Unsupported { feature, detail } => {
+                write!(f, "unsupported {feature}: {detail}")
+            },
         }
     }
 }
