@@ -28,12 +28,19 @@ MiniLM CPU baseline, live in the
 
 | Namespace | CPU | WGPU | Other |
 | --- | --- | --- | --- |
-| `infer` | `decoder` | `decoder-wgpu` | `actor` |
+| `infer` | `decoder` | `decoder-wgpu` | `actor`, `model-session` |
 | `embed` | `index-burn`, `bert` | `index-burn-wgpu`, `bert-wgpu` | `bert-validation` |
 
 Native tokenizer builds use Oniguruma. `wasm32-unknown-unknown` uses
 tokenizers' pure-Rust `unstable_wasm` path, and every Burn feature activates
 the target's JavaScript entropy backend.
+
+With `decoder,model-session`, `infer::library` resolves a model/template row
+from a caller-owned Eidetic store without a network fetcher. `infer::prompt`
+renders strict `esp.prompt-template/v1` data and binds the exact artifact hash
+to the immutable model session. The local import example, pinned SmolLM2 row,
+independent-reference reproduction and resident qualification are recorded in
+the [resident inference plan](../../../design_docs/mere_docs/implementation_strategy/2026-10-15_resident_inference_and_recall_plan.md).
 
 The `actor` feature compiles for wasm, but its Armillary thread actor requires
 a host executor at runtime. See the

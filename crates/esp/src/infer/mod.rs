@@ -28,13 +28,17 @@
 pub mod actor;
 #[cfg(feature = "decoder")]
 pub mod decoder;
+#[cfg(all(feature = "decoder", feature = "model-session"))]
+pub mod library;
+#[cfg(feature = "model-session")]
+pub mod prompt;
 pub mod provider;
 #[cfg(feature = "model-session")]
 pub mod session;
 pub mod stub;
 
 #[cfg(feature = "actor")]
-pub use actor::{InferCommand, InferUpdate, spawn_inference_actor};
+pub use actor::{InferCommand, InferUpdate, spawn_inference_actor, spawn_inference_actor_fallible};
 pub use provider::{
     CapabilityQuery, GenerationRequest, InferError, InferenceProvider, ModelCapability,
 };

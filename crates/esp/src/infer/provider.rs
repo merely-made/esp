@@ -130,6 +130,13 @@ impl std::fmt::Display for InferError {
 
 impl std::error::Error for InferError {}
 
+/// Exact session provenance carried by a bound inference provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIdentity {
+    pub session_id: String,
+    pub prompt_template_hash: String,
+}
+
 /// Provider that generates text from a prompt.
 ///
 /// Implementations must be `Send + Sync` so one loaded instance can be shared
@@ -141,6 +148,11 @@ impl std::error::Error for InferError {}
 /// surfaces it is the caller's choice). Callers that only want the final text
 /// use [`generate`](Self::generate).
 pub trait InferenceProvider: Send + Sync {
+    /// Exact session provenance, absent for unbound providers such as the stub.
+    fn session_identity(&self) -> Option<SessionIdentity> {
+        None
+    }
+
     /// What this provider's loaded model/runtime pair can do.
     fn capability(&self) -> &ModelCapability;
 
