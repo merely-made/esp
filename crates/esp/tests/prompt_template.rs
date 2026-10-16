@@ -93,3 +93,44 @@ fn exact_template_bytes_bind_the_session_and_prepared_request() {
             .unwrap()
     );
 }
+
+#[test]
+fn retained_context_is_rendered_as_literal_data_then_removed_from_decoder_fields() {
+    let provider = SessionProvider::new(bound(TEMPLATE), TEMPLATE.to_vec(), 256).unwrap();
+    let mut request = GenerationRequest {
+        prompt: "which source?".into(),
+        context: "[1] retained {{ literal }} source".into(),
+        ..Default::default()
+    };
+    let prepared = provider.prepare(&request, &request.context).unwrap();
+    assert_eq!(
+        prepared.request.prompt,
+        PromptTemplate::from_bytes(TEMPLATE)
+            .unwrap()
+            .render(&request.prompt, &request.context)
+            .unwrap()
+    );
+    assert!(prepared.request.context.is_empty());
+    // Echoing a chat prompt stops at its first system-role terminator. An
+    // exact response mapping checks the rendered input without that fixture
+    // stop sequence hiding the context before the assertion can inspect it.
+    let matching = BoundModelSession::bind(
+        provider.bound().session().clone(),
+        StubInferenceProvider::new()
+            .with_response(prepared.request.prompt.clone(), "rendered-context-ok"),
+    )
+    .unwrap();
+    let matching = SessionProvider::new(matching, TEMPLATE.to_vec(), 256).unwrap();
+    assert_eq!(matching.generate(&request).unwrap(), "rendered-context-ok");
+    request.clear_private();
+    assert!(request.prompt.is_empty());
+    assert!(request.context.is_empty());
+}
+
+#[test]
+fn empty_context_preserves_the_legacy_serialized_request() {
+    let legacy = r#"{"prompt":"hello","max_tokens":16,"temperature":0.0,"top_p":null,"seed":null,"stop":[]}"#;
+    let request: GenerationRequest = serde_json::from_str(legacy).unwrap();
+    assert!(request.context.is_empty());
+    assert_eq!(serde_json::to_string(&request).unwrap(), legacy);
+}
