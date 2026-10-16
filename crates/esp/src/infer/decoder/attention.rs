@@ -78,17 +78,20 @@ impl LlamaRotaryEncoding {
     /// at the supplied absolute token position.
     pub fn apply(&self, input: Tensor<4>, start: usize) -> Tensor<4> {
         let [batch, heads, sequence, head_dim] = input.dims();
+        let dtype = input.dtype();
         let half = head_dim / 2;
         let cos = self
             .cos
             .clone()
             .slice([start..start + sequence, 0..head_dim])
-            .reshape([1, 1, sequence, head_dim]);
+            .reshape([1, 1, sequence, head_dim])
+            .cast(dtype);
         let sin = self
             .sin
             .clone()
             .slice([start..start + sequence, 0..head_dim])
-            .reshape([1, 1, sequence, head_dim]);
+            .reshape([1, 1, sequence, head_dim])
+            .cast(dtype);
         let first = input
             .clone()
             .slice([0..batch, 0..heads, 0..sequence, 0..half]);

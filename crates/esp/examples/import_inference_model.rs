@@ -12,9 +12,9 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 5 && args.len() != 6 {
+    if !(5..=7).contains(&args.len()) {
         return Err(
-            "usage: import_inference_model LIBRARY_REDB MODEL_DIR TEMPLATE_JSON MODEL_ID LICENSE [STREAMING_OPTIONS_JSON]"
+            "usage: import_inference_model LIBRARY_REDB MODEL_DIR TEMPLATE_JSON MODEL_ID LICENSE [STREAMING_OPTIONS_JSON [WEIGHT_FORMAT]]"
                 .into(),
         );
     }
@@ -59,10 +59,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?
         } else {
             let options = serde_json::from_slice(&std::fs::read(&args[5])?)?;
-            esp::infer::layer_library::import_layered_model(
-                &mut store, &directory, &args[3], &args[4], options,
-            )
-            .await?
+            if args.len() == 7 {
+                let format = args[6].parse()?;
+                esp::infer::layer_library::import_formatted_model(
+                    &mut store, &directory, &args[3], &args[4], options, format,
+                )
+                .await?
+            } else {
+                esp::infer::layer_library::import_layered_model(
+                    &mut store, &directory, &args[3], &args[4], options,
+                )
+                .await?
+            }
         };
         let template = save_typed(
             &mut store,
@@ -86,6 +94,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
         Ok::<_, Box<dyn std::error::Error>>(row)
     })?;
+    if args.len() == 7 {
+        println!(
+            "{}",
+            serde_json::json!({"candidate_row": row.to_string(), "next": "measure against bf16, then publish with qualify_inference_model"})
+        );
+        return Ok(());
+    }
     println!(
         "{}",
         serde_json::json!({"model": {"library": {"row": row.to_string(), "device": "cpu", "max_tokens": 256}}})

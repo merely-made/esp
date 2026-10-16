@@ -11,7 +11,8 @@
 //! reality: HF checkpoints in this class ship **bfloat16** (TinyLlama,
 //! Llama 3.2) or f16, so BF16/F16 decode to f32 here at the boundary.
 //! Weights live as f32 in memory regardless of the on-disk dtype;
-//! quantized formats are a later, deliberate step, not an auto-cast.
+//! This is the legacy f32 corridor. Explicit half and packed library rows use
+//! `weight_format`, whose format is part of the session identity.
 
 use burn::tensor::{Device, Tensor, TensorData};
 use safetensors::tensor::{Dtype, TensorView};

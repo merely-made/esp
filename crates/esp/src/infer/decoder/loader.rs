@@ -23,7 +23,6 @@ use burn::tensor::Device;
 use super::config::DecoderConfig;
 use super::layer::LoadedDecoderLayer;
 use super::model::{DecoderModel, LoadedDecoder};
-use super::tensors::{extract_1d, extract_2d, extract_2d_transposed};
 use crate::infer::provider::InferError;
 
 fn view<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>, InferError> {
@@ -135,6 +134,29 @@ pub(crate) fn load_decoder_shared_tensors(
     tensors: &SafeTensors<'_>,
     device: &Device,
 ) -> Result<LoadedDecoder, InferError> {
+    load_decoder_shared_tensors_with_format(
+        config,
+        tensors,
+        device,
+        super::weight_format::WeightFormat::F32,
+    )
+}
+
+pub(crate) fn load_decoder_shared_tensors_with_format(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    device: &Device,
+    format: super::weight_format::WeightFormat,
+) -> Result<LoadedDecoder, InferError> {
+    let extract_1d = |v: &TensorView<'_>, len, device: &Device| {
+        super::weight_format::extract(v, [len], device, format, false)
+    };
+    let extract_2d = |v: &TensorView<'_>, rows, cols, device: &Device| {
+        super::weight_format::extract(v, [rows, cols], device, format, false)
+    };
+    let extract_2d_transposed = |v: &TensorView<'_>, rows, cols, device: &Device| {
+        super::weight_format::extract(v, [rows, cols], device, format, true)
+    };
     let h = config.hidden_size;
     let lm_head_w = match tensors.tensor("lm_head.weight") {
         Ok(v) => Some(extract_2d_transposed(&v, config.vocab_size, h, device)?),
@@ -166,6 +188,28 @@ pub(crate) fn load_decoder_layer(
     i: usize,
     device: &Device,
 ) -> Result<LoadedDecoderLayer, InferError> {
+    load_decoder_layer_with_format(
+        config,
+        tensors,
+        i,
+        device,
+        super::weight_format::WeightFormat::F32,
+    )
+}
+
+pub(crate) fn load_decoder_layer_with_format(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    i: usize,
+    device: &Device,
+    format: super::weight_format::WeightFormat,
+) -> Result<LoadedDecoderLayer, InferError> {
+    let extract_1d = |v: &TensorView<'_>, len, device: &Device| {
+        super::weight_format::extract(v, [len], device, format, false)
+    };
+    let extract_2d_transposed = |v: &TensorView<'_>, rows, cols, device: &Device| {
+        super::weight_format::extract(v, [rows, cols], device, format, true)
+    };
     let h = config.hidden_size;
     let kv = config.kv_heads() * config.head_dim();
     let inter = config.intermediate_size;

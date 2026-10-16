@@ -28,7 +28,7 @@ MiniLM CPU baseline, live in the
 
 | Namespace | CPU | WGPU | Other |
 | --- | --- | --- | --- |
-| `infer` | `decoder` | `decoder-wgpu` | `actor`, `model-session` |
+| `infer` | `decoder`, `decoder-flex` | `decoder-wgpu` | `actor`, `model-session` |
 | `embed` | `index-burn`, `bert` | `index-burn-wgpu`, `bert-wgpu` | `bert-validation` |
 
 Native tokenizer builds use Oniguruma. `wasm32-unknown-unknown` uses
@@ -68,6 +68,37 @@ process memory measurement. The real-model fixture is
 (13.71 GB of f32 weights on an 8 GB GPU), exact reference tokens and resumed
 tokens, plus a 4,126-token SmolLM2 prefill. The plan records memory, timing,
 logical I/O and the measurement boundaries.
+
+Explicit weight formats use `esp.layer-weights/v2`. Add a seventh import
+argument, `f16`, `bf16`, `q8-block32` or `q4-block32`, after the streaming
+options file. The result is a candidate row. `import_formatted_model` performs
+the same import for hosts. Half tensors are constructed with an explicit dtype;
+Q8 and Q4 projections are quantized once in HF output-row order, with signed
+integers packed into little-endian u32 words and one f32 scale per 32 input
+weights within each output row.
+Their embeddings and norms remain f16, including a tied output head. Projection
+input and output widths must be divisible by 32. The runtime reads these stored buffers
+directly, transposes their metadata and multiplies packed weights in the GPU kernel.
+
+`decoder-flex` enables CPU f16/bf16. The wgpu row supports f16 and the packed
+formats when its device reports support. Unsupported formats return an error.
+The current Flex backend rejects these packed schemes; bf16 GPU execution
+requires a backend reporting that dtype and has not been qualified on this
+Windows Vulkan device.
+
+A candidate is accessible through the explicit diagnostic
+`resolve_library_candidate` path. Resident selection uses
+`resolve_library_session` and requires `FormatQualification`: a comparison
+against the same source checkpoint's bf16 row on exact rendered prompts,
+next-token logit RMSE and maximum error, generated token ids, and memory and
+streaming costs. `qualify_formatted_model` publishes the measured envelope;
+`qualify_inference_model LIBRARY_REDB CANDIDATE_ROW QUALIFICATION_JSON` exposes
+that operation as a host command. Qualification is specific to its measured
+loader. `/layer-stream-v2/<format>` and the format field enter session identity;
+a format change refuses an existing checkpoint. Payload byte counts exclude
+allocator overhead, temporary compute buffers, activations and KV caches.
+`tests/weight_formats_real.rs` and `support/run_resident_weight_formats.ps1`
+record real-model comparisons and separate host memory measurements.
 
 Providers expose cooperative cancellation separately from text fragments, so
 a host can cancel a device wait before generation starts. The LoRA trainer
