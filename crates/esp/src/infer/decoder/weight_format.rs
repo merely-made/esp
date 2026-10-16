@@ -1,4 +1,7 @@
 // Copyright 2026 Mark Alan Boykin
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // SPDX-License-Identifier: MPL-2.0
 
 //! Explicit, versioned weight representations. Packed projections are stored
@@ -142,9 +145,9 @@ pub fn convert_artifact(bytes: &[u8], format: WeightFormat) -> Result<Vec<u8>, I
             let [rows, cols]: [usize; 2] = view.shape().try_into().map_err(invalid)?;
             // Pack along K within each HF output row. Transposition at load
             // changes metadata, keeping packing and scales on the same axis.
-            if !rows.is_multiple_of(32) || !cols.is_multiple_of(32) {
+            if !cols.is_multiple_of(32) {
                 return Err(invalid(format!(
-                    "{name}: projection dimensions {rows}x{cols} must be divisible by 32"
+                    "{name}: projection input width {cols} must be divisible by 32"
                 )));
             }
             let bits = scheme.value.size_bits();
@@ -238,8 +241,10 @@ pub(crate) fn extract<const D: usize>(
         if D != 2 || !transpose {
             return Err(invalid("packed tensor must be a projection"));
         }
-        if !shape[0].is_multiple_of(32) || !shape[1].is_multiple_of(32) {
-            return Err(invalid("packed projection width must be divisible by 32"));
+        if !shape[1].is_multiple_of(32) {
+            return Err(invalid(
+                "packed projection input width must be divisible by 32",
+            ));
         }
         let elements = shape
             .iter()
@@ -430,6 +435,82 @@ mod tests {
         let device = Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0));
         check(device.clone(), WeightFormat::Q4Block32, 960, 30);
         check(device, WeightFormat::Q4Block32, 960, 1);
+    }
+
+    #[cfg(feature = "decoder-wgpu")]
+    #[test]
+    fn gpu_streamed_formats_cover_untied_heads_and_warm_decode() {
+        use super::super::loader::tests::{serialize_f32, tiny_tensor_table};
+        use super::super::{loader, model::DecoderModel, streaming::StreamingOptions};
+        use burn::tensor::Int;
+        let mut config = super::super::test_support::tiny_config();
+        config.hidden_size = 64;
+        config.intermediate_size = 128;
+        config.vocab_size = 79;
+        let table = tiny_tensor_table(&config, true);
+        let shared: Vec<_> = table
+            .iter()
+            .filter(|(name, _, _)| !name.starts_with("model.layers."))
+            .cloned()
+            .collect();
+        let device = Device::wgpu(burn::tensor::DeviceKind::DiscreteGpu(0));
+        let mut baseline: Option<Vec<f32>> = None;
+        for format in [
+            WeightFormat::F16,
+            WeightFormat::Q8Block32,
+            WeightFormat::Q4Block32,
+        ] {
+            let bytes = convert_artifact(&serialize_f32(&shared), format).unwrap();
+            let tensors = SafeTensors::deserialize(&bytes).unwrap();
+            let loaded =
+                loader::load_decoder_shared_tensors_with_format(&config, &tensors, &device, format)
+                    .unwrap();
+            let layers: Vec<_> = (0..config.num_hidden_layers)
+                .map(|i| {
+                    let prefix = format!("model.layers.{i}.");
+                    let layer: Vec<_> = table
+                        .iter()
+                        .filter(|(name, _, _)| name.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    convert_artifact(&serialize_f32(&layer), format).unwrap()
+                })
+                .collect();
+            let model = DecoderModel::from_layer_source_with_format(
+                config.clone(),
+                loaded,
+                Box::new(move |i: usize, _| Ok(layers[i].clone())),
+                StreamingOptions::default(),
+                &device,
+                format,
+            )
+            .unwrap();
+            let mut cache = model.new_cache();
+            let mut logits = Vec::new();
+            for ids in [vec![3i32, 7], vec![9i32]] {
+                let len = ids.len();
+                let output = model
+                    .try_forward_cached_last(
+                        Tensor::<2, Int>::from_data(TensorData::new(ids, [1, len]), &device),
+                        &mut cache,
+                    )
+                    .unwrap();
+                assert_eq!(output.dims(), [1, 1, 79]);
+                assert_eq!(output.dtype(), DType::F32);
+                logits.extend(output.into_data().try_to_vec::<f32>().unwrap());
+            }
+            assert!(logits.iter().all(|v| v.is_finite()));
+            if let Some(reference) = &baseline {
+                assert!(
+                    logits
+                        .iter()
+                        .zip(reference)
+                        .all(|(a, b)| (a - b).abs() < 0.05)
+                );
+            } else {
+                baseline = Some(logits);
+            }
+        }
     }
 
     #[test]
