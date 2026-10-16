@@ -60,6 +60,14 @@ pub struct Sampler {
 }
 
 impl Sampler {
+    /// Advance exactly the recorded number of splitmix64 draws, in O(1).
+    pub fn skip_draws(&mut self, draws: u64) {
+        self.rng.0 = self
+            .rng
+            .0
+            .wrapping_add(0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draws));
+    }
+
     /// `temperature` must be positive (greedy is a different code path,
     /// not temperature zero here).
     pub fn new(temperature: f32, top_p: Option<f32>, seed: u64) -> Self {

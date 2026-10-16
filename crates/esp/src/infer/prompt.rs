@@ -161,6 +161,39 @@ impl<P: InferenceProvider> SessionProvider<P> {
 }
 
 impl<P: InferenceProvider> InferenceProvider for SessionProvider<P> {
+    fn generate_checkpointed(
+        &self,
+        request: &GenerationRequest,
+        resume: Option<&super::provider::GenerationCheckpoint>,
+        commit: &mut dyn FnMut(&super::provider::GenerationCheckpoint) -> Result<(), InferError>,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<super::provider::GenerationCheckpoint, InferError> {
+        let identity = self.session_identity();
+        if resume.is_some_and(|checkpoint| checkpoint.session != identity) {
+            return Err(InferError::InvalidRequest(
+                "checkpoint belongs to a different exact session".into(),
+            ));
+        }
+        // Render only at creation. A resume uses the exact persisted bytes,
+        // including the originally chosen seed and stop strings.
+        let prepared = match resume {
+            Some(checkpoint) => checkpoint.request.clone(),
+            None => self.prepare(request, "")?.request,
+        };
+        let mut checkpoint = self.bound.provider().generate_checkpointed(
+            &prepared,
+            resume,
+            &mut |checkpoint| {
+                let mut checkpoint = checkpoint.clone();
+                checkpoint.session = identity.clone();
+                commit(&checkpoint)
+            },
+            stop,
+        )?;
+        checkpoint.session = identity;
+        Ok(checkpoint)
+    }
+
     fn capability(&self) -> &ModelCapability {
         self.bound.provider().capability()
     }

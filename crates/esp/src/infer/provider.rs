@@ -75,6 +75,25 @@ pub struct GenerationRequest {
     pub stop: Vec<String>,
 }
 
+impl GenerationRequest {
+    /// Clear persona text retained by a stopped actor or checkpoint.
+    pub fn clear_private(&mut self) {
+        use zeroize::Zeroize;
+        self.prompt.zeroize();
+        for stop in &mut self.stop {
+            stop.zeroize();
+        }
+        self.stop.clear();
+        self.seed.zeroize();
+    }
+}
+
+impl zeroize::Zeroize for GenerationRequest {
+    fn zeroize(&mut self) {
+        self.clear_private();
+    }
+}
+
 impl Default for GenerationRequest {
     fn default() -> Self {
         Self {
@@ -95,6 +114,8 @@ pub enum InferError {
     PromptTooLong { length: usize, limit: usize },
     /// The provider type can hold a model but no weights are loaded yet.
     ModelNotLoaded,
+    /// A cooperative host stop before the first checkpoint could be prepared.
+    Interrupted,
     /// The underlying runtime (Burn / CPU / wgpu / native engine) failed.
     Backend(String),
     /// The request itself is invalid (empty prompt, zero max_tokens, ...).
@@ -116,6 +137,7 @@ impl std::fmt::Display for InferError {
             InferError::PromptTooLong { length, limit } => {
                 write!(f, "prompt too long: {length} > {limit}")
             },
+            InferError::Interrupted => write!(f, "generation interrupted at a token boundary"),
             InferError::ModelNotLoaded => write!(f, "model not loaded"),
             InferError::Backend(msg) => write!(f, "backend: {msg}"),
             InferError::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
@@ -137,6 +159,32 @@ pub struct SessionIdentity {
     pub prompt_template_hash: String,
 }
 
+/// Portable generation state. KV tensors are deliberately absent. `request`
+/// contains the rendered prompt, and `draws` counts committed sampling draws,
+/// including a terminating EOS draw. A host commits this before publishing it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationCheckpoint {
+    pub session: Option<SessionIdentity>,
+    pub request: GenerationRequest,
+    pub prompt_ids: Vec<u32>,
+    pub token_ids: Vec<u32>,
+    pub draws: u64,
+    pub text: String,
+    pub complete: bool,
+}
+
+impl Drop for GenerationCheckpoint {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.request.clear_private();
+        self.prompt_ids.zeroize();
+        self.token_ids.zeroize();
+        self.text.zeroize();
+        self.draws.zeroize();
+    }
+}
+
 /// Provider that generates text from a prompt.
 ///
 /// Implementations must be `Send + Sync` so one loaded instance can be shared
@@ -148,6 +196,23 @@ pub struct SessionIdentity {
 /// surfaces it is the caller's choice). Callers that only want the final text
 /// use [`generate`](Self::generate).
 pub trait InferenceProvider: Send + Sync {
+    /// Resume by prefilling the recorded prompt and generated IDs. The commit
+    /// callback is synchronous: failure stops generation before another token.
+    /// A true stop flag pauses at a token boundary, without committing a draw
+    /// that did not produce a durable token. Unsupported providers refuse.
+    fn generate_checkpointed(
+        &self,
+        _request: &GenerationRequest,
+        _resume: Option<&GenerationCheckpoint>,
+        _commit: &mut dyn FnMut(&GenerationCheckpoint) -> Result<(), InferError>,
+        _stop: &mut dyn FnMut() -> bool,
+    ) -> Result<GenerationCheckpoint, InferError> {
+        Err(InferError::Unsupported {
+            feature: "durable-generation".into(),
+            detail: "this provider cannot checkpoint model tokens".into(),
+        })
+    }
+
     /// Cooperative entry point for providers that may wait for device access.
     /// The default preserves existing providers' fragment cancellation.
     fn generate_streaming_controlled(

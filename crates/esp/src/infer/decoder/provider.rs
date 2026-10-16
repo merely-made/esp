@@ -71,6 +71,14 @@ struct StreamObserver<'a> {
     decode_error: Option<InferError>,
 }
 
+impl Drop for StreamObserver<'_> {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.generated_ids.zeroize();
+        self.emitted.zeroize();
+    }
+}
+
 impl<'a> StreamObserver<'a> {
     fn new(
         provider: &'a DecoderProvider,
@@ -149,7 +157,7 @@ impl<'a> StreamObserver<'a> {
         token_ids: Vec<u32>,
         cooperatively_cancelled: bool,
     ) -> Result<DecoderGeneration, InferError> {
-        if let Some(error) = self.decode_error {
+        if let Some(error) = self.decode_error.take() {
             return Err(error);
         }
         // At a normal token limit an incomplete stop prefix is ordinary text.
@@ -164,7 +172,7 @@ impl<'a> StreamObserver<'a> {
             }
         }
         Ok(DecoderGeneration {
-            text: self.emitted,
+            text: std::mem::take(&mut self.emitted),
             token_ids,
             emitted_fragments: self.emitted_fragments,
             stopped_by_callback: self.stopped_by_callback,
@@ -375,6 +383,124 @@ impl DecoderProvider {
 }
 
 impl InferenceProvider for DecoderProvider {
+    fn generate_checkpointed(
+        &self,
+        request: &GenerationRequest,
+        resume: Option<&crate::infer::provider::GenerationCheckpoint>,
+        commit: &mut dyn FnMut(
+            &crate::infer::provider::GenerationCheckpoint,
+        ) -> Result<(), InferError>,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<crate::infer::provider::GenerationCheckpoint, InferError> {
+        use crate::infer::provider::GenerationCheckpoint;
+        let mut request = zeroize::Zeroizing::new(
+            resume.map_or_else(|| request.clone(), |cp| cp.request.clone()),
+        );
+        if request.temperature > 0.0 && request.seed.is_none() {
+            request.seed = Some(SplitMix64::from_entropy().1);
+        }
+        let (prompt_ids, max_new, mut picker) = self.prepare_generation(&request)?;
+        let mut cp = resume.cloned().unwrap_or_else(|| GenerationCheckpoint {
+            session: None,
+            request: (*request).clone(),
+            prompt_ids: prompt_ids.clone(),
+            token_ids: Vec::new(),
+            draws: 0,
+            text: String::new(),
+            complete: false,
+        });
+        let sampled = request.temperature > 0.0;
+        if cp.prompt_ids != prompt_ids
+            || cp.token_ids.len() > max_new
+            || cp
+                .token_ids
+                .iter()
+                .any(|&id| id as usize >= self.model.config().vocab_size)
+            || (!cp.complete
+                && cp.draws
+                    != if sampled {
+                        cp.token_ids.len() as u64
+                    } else {
+                        0
+                    })
+        {
+            return Err(InferError::InvalidRequest(
+                "invalid generation checkpoint tokens or draw position".into(),
+            ));
+        }
+        if cp.complete {
+            return Ok(cp);
+        }
+        if let TokenPicker::Sampled(sampler) = &mut picker {
+            sampler.skip_draws(cp.draws);
+        }
+        let mut discard = |_: &str| ControlFlow::Continue(());
+        let mut unobserved = |_: u32| {};
+        let mut observer = StreamObserver::new(self, &request, &mut discard, &mut unobserved);
+        for &token in &cp.token_ids {
+            let _ = observer.observe(token);
+        }
+        if observer.emitted != cp.text || observer.stopped_by_string {
+            return Err(InferError::InvalidRequest(
+                "checkpoint text or stop state does not match token IDs".into(),
+            ));
+        }
+        commit(&cp)?;
+        if stop() {
+            return Ok(cp);
+        }
+        let mut prefix = prompt_ids;
+        prefix.extend_from_slice(&cp.token_ids);
+        if prefix.len() >= self.capability.context_window {
+            return Err(InferError::PromptTooLong {
+                length: prefix.len(),
+                limit: self.capability.context_window,
+            });
+        }
+        let device = self.model.device();
+        let mut cache = self.model.new_cache();
+        let input: Tensor<2, Int> = Tensor::from_data(
+            TensorData::new(
+                prefix.iter().map(|&token| token as i32).collect::<Vec<_>>(),
+                [1, prefix.len()],
+            ),
+            &device,
+        );
+        let mut logits = self.model.forward_cached(input, &mut cache);
+        while cp.token_ids.len() < max_new {
+            // No draw is spent on a paused, cancelled or stopped device.
+            if stop() {
+                return Ok(cp);
+            }
+            let token = picker.pick(&logits);
+            cp.draws += u64::from(sampled);
+            if self.model.config().eos_token_id.contains(&token) {
+                cp.complete = true;
+            } else {
+                cp.token_ids.push(token);
+                let _ = observer.observe(token);
+                if let Some(error) = observer.decode_error.take() {
+                    return Err(error);
+                }
+                cp.complete = observer.stopped_by_string || cp.token_ids.len() == max_new;
+            }
+            cp.text = observer.emitted.clone();
+            if cp.complete && !observer.stopped_by_string {
+                cp.text = self.decode(&cp.token_ids)?;
+            }
+            commit(&cp)?;
+            if cp.complete || stop() {
+                return Ok(cp);
+            }
+            let step: Tensor<2, Int> =
+                Tensor::from_data(TensorData::new(vec![token as i32], [1, 1]), &device);
+            logits = self.model.forward_cached(step, &mut cache);
+        }
+        cp.complete = true;
+        commit(&cp)?;
+        Ok(cp)
+    }
+
     fn capability(&self) -> &ModelCapability {
         &self.capability
     }

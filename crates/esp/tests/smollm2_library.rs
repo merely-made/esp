@@ -147,7 +147,40 @@ fn library_matches_reference(device: DecoderDevice, loader: &str, adapter: serde
             generated.text,
             "actor-compatible provider path"
         );
-        rows.push(serde_json::json!({"question": question, "token_ids": generated.token_ids, "text": generated.text, "seconds": seconds}));
+        let boundary = std::cell::Cell::new(0usize);
+        let uninterrupted = provider
+            .generate_checkpointed(&request, None, &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        assert_eq!(uninterrupted.token_ids, generated.token_ids);
+        let paused = provider
+            .generate_checkpointed(
+                &request,
+                None,
+                &mut |cp| {
+                    boundary.set(cp.token_ids.len());
+                    Ok(())
+                },
+                &mut || boundary.get() >= 3,
+            )
+            .unwrap();
+        let resumed = provider
+            .generate_checkpointed(&request, Some(&paused), &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        let first_difference = uninterrupted
+            .token_ids
+            .iter()
+            .zip(&resumed.token_ids)
+            .position(|(a, b)| a != b)
+            .or_else(|| {
+                (uninterrupted.token_ids.len() != resumed.token_ids.len())
+                    .then_some(uninterrupted.token_ids.len().min(resumed.token_ids.len()))
+            });
+        assert!(
+            first_difference.is_none(),
+            "prefill resume differed at {first_difference:?}; same-backend qualification requires a numerical trace if this changes"
+        );
+        rows.push(serde_json::json!({"question": question, "token_ids": generated.token_ids, "text": generated.text, "seconds": seconds,
+            "resume_at": paused.token_ids.len(), "resumed_token_ids": resumed.token_ids, "draws": resumed.draws, "first_differing_token": first_difference}));
     }
     let receipt = serde_json::json!({"backend": loader, "adapter": adapter, "model": reference["model_id"], "revision": reference["revision"],
         "row": row, "session": identity, "load_seconds": load_seconds, "rows": rows});
