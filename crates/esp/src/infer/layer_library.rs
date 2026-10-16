@@ -319,6 +319,33 @@ mod tests {
     }
 
     #[test]
+    fn direct_provider_refuses_shared_artifacts_over_budget() {
+        let directory = fixture(256);
+        let mut reader = super::super::decoder::checkpoint::CheckpointReader::open(
+            directory.path(),
+            &tiny_config(),
+        )
+        .unwrap();
+        let shared = reader.shared_bytes(1024 * 1024).unwrap();
+        let result = DecoderProvider::from_layer_source(
+            &serde_json::to_vec(&config_json(256)).unwrap(),
+            &std::fs::read(directory.path().join("tokenizer.json")).unwrap(),
+            &shared,
+            Box::new(|_, _| Err(InferError::Backend("unused source".into()))),
+            StreamingOptions {
+                max_shared_bytes: 1,
+                ..Default::default()
+            },
+            "fixture/layered",
+            "burn-ndarray/layer-stream-v1",
+            &DecoderDevice::ndarray(),
+        );
+        assert!(
+            matches!(result, Err(InferError::InvalidWeights(message)) if message.contains("shared artifact"))
+        );
+    }
+
+    #[test]
     fn corrupted_or_oversized_layer_is_refused_before_generation() {
         let directory = fixture(256);
         let (store, resolved) = imported(directory.path());
