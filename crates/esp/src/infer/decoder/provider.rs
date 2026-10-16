@@ -246,6 +246,30 @@ impl DecoderProvider {
         loader: impl Into<String>,
         device: &Device,
     ) -> Result<Self, InferError> {
+        Self::from_layer_source_with_format(
+            config_bytes,
+            tokenizer_bytes,
+            shared_bytes,
+            source,
+            options,
+            model_id,
+            loader,
+            device,
+            super::WeightFormat::F32,
+        )
+    }
+
+    pub fn from_layer_source_with_format(
+        config_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        shared_bytes: &[u8],
+        source: Box<dyn super::streaming::LayerSource>,
+        options: super::streaming::StreamingOptions,
+        model_id: impl Into<String>,
+        loader: impl Into<String>,
+        device: &Device,
+        format: super::WeightFormat,
+    ) -> Result<Self, InferError> {
         options.validate()?;
         if shared_bytes.len() > options.max_shared_bytes {
             return Err(InferError::InvalidWeights(
@@ -267,9 +291,17 @@ impl DecoderProvider {
                 "unexpected tensor in shared artifact".into(),
             ));
         }
-        let shared = super::loader::load_decoder_shared_tensors(&config, &tensors, device)?;
-        let model = DecoderModel::from_layer_source(config, shared, source, options, device)?;
-        Ok(Self::from_parts(model, tokenizer, model_id, loader))
+        format.validate_device(device)?;
+        let shared = super::loader::load_decoder_shared_tensors_with_format(
+            &config, &tensors, device, format,
+        )?;
+        let model = DecoderModel::from_layer_source_with_format(
+            config, shared, source, options, device, format,
+        )?;
+        let mut provider = Self::from_parts(model, tokenizer, model_id, loader);
+        provider.capability.quantization =
+            (format != super::WeightFormat::F32).then(|| format.id().into());
+        Ok(provider)
     }
 
     /// Full vocabulary logits for the token immediately following a rendered

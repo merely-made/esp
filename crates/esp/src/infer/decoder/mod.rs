@@ -39,6 +39,8 @@ pub mod provider;
 pub mod sample;
 pub mod streaming;
 pub mod tensors;
+pub mod weight_format;
+pub use weight_format::WeightFormat;
 #[cfg(feature = "decoder-lora")]
 pub mod train;
 #[cfg(feature = "decoder-autodiff")]

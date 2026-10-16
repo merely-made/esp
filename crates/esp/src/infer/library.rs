@@ -6,9 +6,10 @@
 
 //! Local-only resolution of an inference row from the owner's model library.
 
+use super::decoder::WeightFormat;
 use super::decoder::streaming::LayerSource;
 use super::decoder::{DecoderDevice, DecoderProvider};
-use super::layer_library::{LayerArtifact, LayerWeightIndex};
+use super::layer_library::{FormattedLayerWeightIndex, LayerArtifact, LayerWeightIndex};
 use super::prompt::{PromptTemplate, SessionProvider};
 use super::{BoundModelSession, InferError, ModelSession};
 use eidetic::typed::{TypedPayload, load_typed};
@@ -57,12 +58,30 @@ pub struct ResolvedInferenceRow {
     model: eidetic::models::ResolvedModel,
     template_bytes: Vec<u8>,
     layered: Option<LayerWeightIndex>,
+    formatted: Option<FormattedLayerWeightIndex>,
 }
 
 /// Resolve and validate the row and template without constructing a device.
 pub async fn resolve_library_session(
     store: &mut dyn Store,
     row: ManifestId,
+) -> Result<ResolvedInferenceRow, InferError> {
+    resolve_library_row(store, row, false).await
+}
+
+/// Diagnostic owner path for measuring an imported candidate. Resident
+/// selection must use `resolve_library_session`, which requires qualification.
+pub async fn resolve_library_candidate(
+    store: &mut dyn Store,
+    row: ManifestId,
+) -> Result<ResolvedInferenceRow, InferError> {
+    resolve_library_row(store, row, true).await
+}
+
+async fn resolve_library_row(
+    store: &mut dyn Store,
+    row: ManifestId,
+    candidate: bool,
 ) -> Result<ResolvedInferenceRow, InferError> {
     let row = load_typed::<InferenceModelRow>(store, &mut NoFetcher, row)
         .await
@@ -87,7 +106,34 @@ pub async fn resolve_library_session(
         .await
         .map_err(failure)?
         .ok_or_else(|| failure("weight manifest missing"))?;
-    let layered = if weight_manifest.schema == LayerWeightIndex::schema_ref() {
+    let formatted = if weight_manifest.schema == FormattedLayerWeightIndex::schema_ref() {
+        if weight_manifest.id != model_manifest.weight_blob
+            || weight_manifest.content_hash != model_manifest.weight_blob.0
+        {
+            return Err(failure("formatted index identity mismatch"));
+        }
+        let index = load_typed::<FormattedLayerWeightIndex>(
+            store,
+            &mut NoFetcher,
+            model_manifest.weight_blob,
+        )
+        .await
+        .map_err(failure)?
+        .ok_or_else(|| failure("formatted index missing"))?;
+        match &index.qualification {
+            Some(qualification) => qualification.validate()?,
+            None if !candidate => {
+                return Err(failure("weight format candidate has not been measured"));
+            },
+            None => (),
+        }
+        Some(index)
+    } else {
+        None
+    };
+    let layered = if let Some(index) = &formatted {
+        Some(index.weights.clone())
+    } else if weight_manifest.schema == LayerWeightIndex::schema_ref() {
         if weight_manifest.id != model_manifest.weight_blob
             || weight_manifest.content_hash != model_manifest.weight_blob.0
         {
@@ -100,17 +146,19 @@ pub async fn resolve_library_session(
                 .await
                 .map_err(failure)?
                 .ok_or_else(|| failure("layer index missing"))?;
+        Some(index)
+    } else {
+        None
+    };
+    if let Some(index) = &layered {
         index.options.validate()?;
         let config = super::decoder::DecoderConfig::from_json_bytes(
             &serde_json::to_vec(&model_manifest.config).map_err(failure)?,
         )?;
         if index.layers.len() != config.num_hidden_layers {
-            return Err(failure("layer index count disagrees with model config"));
+            return Err(failure("layer count disagrees with config"));
         }
-        Some(index)
-    } else {
-        None
-    };
+    }
     let resolved = if let Some(index) = &layered {
         let tokenizer_manifest =
             eidetic::manifest::load_manifest(store, model_manifest.tokenizer_blob)
@@ -145,45 +193,75 @@ pub async fn resolve_library_session(
         model: resolved,
         template_bytes,
         layered,
+        formatted,
     })
 }
 
 impl ResolvedInferenceRow {
+    pub fn weight_format(&self) -> Option<WeightFormat> {
+        self.formatted.as_ref().map(|index| index.format)
+    }
+
     /// A host retains the model-library owner while this source is in use.
     pub fn layer_artifacts(&self) -> Option<Vec<LayerArtifact>> {
         self.layered.as_ref().map(|index| index.layers.clone())
     }
 
     fn execution_loader(&self, loader: &str) -> String {
-        if self.layered.is_some() {
+        if let Some(index) = &self.formatted {
+            format!("{loader}/layer-stream-v2/{}", index.format.id())
+        } else if self.layered.is_some() {
             format!("{loader}/layer-stream-v1")
         } else {
             loader.into()
         }
     }
-    /// Exact identity before a deferred device load. The decoder currently
-    /// accepts only unquantized model weights.
+    /// Exact identity before a deferred device load, including execution format.
     pub fn session(&self, loader: &str) -> ModelSession {
         ModelSession {
             base_model_ref: self.model_ref,
             model_id: self.model.manifest.model_id.clone(),
             tokenizer_ref: self.model.manifest.tokenizer_blob,
             prompt_template_hash: eidetic::Hash::of(&self.template_bytes),
-            quantization: None,
+            quantization: self
+                .formatted
+                .as_ref()
+                .filter(|i| i.format != WeightFormat::F32)
+                .map(|i| i.format.id().into()),
             loader: self.execution_loader(loader),
             adapters: Vec::new(),
         }
     }
 
+    fn validate_qualification(&self, loader: &str) -> Result<(), InferError> {
+        if let Some(qualification) = self
+            .formatted
+            .as_ref()
+            .and_then(|i| i.qualification.as_ref())
+        {
+            if qualification.measured_loader != self.execution_loader(loader) {
+                return Err(failure(
+                    "weight format has not been qualified on this loader",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Declared capability for a deferred loader. Tensor shape validation still
     /// occurs at device load; the host must surface that call's failures.
     pub fn capability(&self, loader: &str) -> Result<super::ModelCapability, InferError> {
+        self.validate_qualification(loader)?;
         let config =
             super::decoder::DecoderConfig::from_json_bytes(&self.model.components.config_bytes)?;
         Ok(super::ModelCapability {
             model_id: self.model.manifest.model_id.clone(),
             context_window: config.max_position_embeddings,
-            quantization: None,
+            quantization: self
+                .formatted
+                .as_ref()
+                .filter(|i| i.format != WeightFormat::F32)
+                .map(|i| i.format.id().into()),
             loader: self.execution_loader(loader),
             streaming: true,
         })
@@ -206,8 +284,9 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Option<Box<dyn LayerSource>>,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
+        self.validate_qualification(loader)?;
         let provider = if let Some(index) = &self.layered {
-            DecoderProvider::from_layer_source(
+            DecoderProvider::from_layer_source_with_format(
                 &self.model.components.config_bytes,
                 &self.model.components.tokenizer_bytes,
                 &self.model.components.weight_bytes,
@@ -217,6 +296,10 @@ impl ResolvedInferenceRow {
                 &self.model.manifest.model_id,
                 self.execution_loader(loader),
                 device,
+                self.formatted
+                    .as_ref()
+                    .map(|i| i.format)
+                    .unwrap_or_default(),
             )?
         } else {
             DecoderProvider::from_bytes(

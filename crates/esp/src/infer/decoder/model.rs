@@ -50,6 +50,7 @@ pub struct DecoderModel {
     rope: LlamaRotaryEncoding,
     config: DecoderConfig,
     streamed: Option<StreamingLayers>,
+    format: super::WeightFormat,
 }
 
 impl DecoderModel {
@@ -75,6 +76,7 @@ impl DecoderModel {
             rope,
             config,
             streamed: None,
+            format: super::WeightFormat::F32,
         }
     }
 
@@ -88,7 +90,26 @@ impl DecoderModel {
         options: StreamingOptions,
         device: &Device,
     ) -> Result<Self, InferError> {
+        Self::from_layer_source_with_format(
+            config,
+            shared,
+            source,
+            options,
+            device,
+            super::WeightFormat::F32,
+        )
+    }
+
+    pub fn from_layer_source_with_format(
+        config: DecoderConfig,
+        shared: LoadedDecoder,
+        source: Box<dyn LayerSource>,
+        options: StreamingOptions,
+        device: &Device,
+        format: super::WeightFormat,
+    ) -> Result<Self, InferError> {
         options.validate()?;
+        format.validate_device(device)?;
         if cfg!(target_family = "wasm") {
             return Err(InferError::Unsupported {
                 feature: "native layer streaming".into(),
@@ -100,7 +121,23 @@ impl DecoderModel {
                 "streamed shared tensors contain layers".into(),
             ));
         }
+        let dtype = format.activation_dtype();
+        if shared.embed_w.dtype() != dtype
+            || shared.final_norm_gamma.dtype() != dtype
+            || shared.lm_head_w.as_ref().is_some_and(|head| {
+                match (format.execution_scheme(), head.dtype()) {
+                    (Some(expected), burn::tensor::DType::QFloat(actual)) => expected != actual,
+                    (None, actual) => actual != dtype,
+                    _ => true,
+                }
+            })
+        {
+            return Err(InferError::InvalidWeights(
+                "shared tensor dtype disagrees with the declared weight format".into(),
+            ));
+        }
         let mut model = Self::from_loaded(config, shared, device);
+        model.format = format;
         model.streamed = Some(StreamingLayers::new(source, options));
         Ok(model)
     }
@@ -174,7 +211,8 @@ impl DecoderModel {
         let [batch, seq, width] = hidden.dims();
         Ok(self
             .lm_head
-            .forward(hidden.slice([0..batch, seq - 1..seq, 0..width])))
+            .forward(hidden.slice([0..batch, seq - 1..seq, 0..width]))
+            .cast(burn::tensor::DType::F32))
     }
 
     fn forward_cached_hidden(
@@ -202,8 +240,13 @@ impl DecoderModel {
                     InferError::InvalidWeights(format!("layer {index}: {error}"))
                 })?;
                 super::loader::validate_layer_names(&tensors, index)?;
-                let loaded =
-                    super::loader::load_decoder_layer(&self.config, &tensors, index, &device)?;
+                let loaded = super::loader::load_decoder_layer_with_format(
+                    &self.config,
+                    &tensors,
+                    index,
+                    &device,
+                    self.format,
+                )?;
                 drop(tensors);
                 drop(bytes);
                 let layer = DecoderLayer::from_loaded(&self.config, loaded, &device);
