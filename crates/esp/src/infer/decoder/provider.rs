@@ -246,6 +246,12 @@ impl DecoderProvider {
         loader: impl Into<String>,
         device: &Device,
     ) -> Result<Self, InferError> {
+        options.validate()?;
+        if shared_bytes.len() > options.max_shared_bytes {
+            return Err(InferError::InvalidWeights(
+                "shared artifact exceeds its byte limit".into(),
+            ));
+        }
         let config = DecoderConfig::from_json_bytes(config_bytes)?;
         let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
             .map_err(|error| InferError::InvalidConfig(format!("tokenizer: {error}")))?;
