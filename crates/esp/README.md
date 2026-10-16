@@ -47,6 +47,16 @@ a host can cancel a device wait before generation starts. The LoRA trainer
 arms also expose controlled entry points that check cancellation between
 bounded tensor operations; the original entry points retain their behavior.
 
+`InferenceProvider::generate_checkpointed` adds token-level durable generation
+for the decoder and session provider. It persists an actual seed before the
+first sampled token, resumes splitmix64 at the committed draw, and rebuilds KV
+state from the recorded prompt and generated IDs. A session provider refuses a
+checkpoint from another exact session before executing it. The actor accepts
+checkpointed requests and pause commands, with a synchronous host commit barrier
+before each visible checkpoint. Providers without this capability refuse it.
+The native SmolLM2 GPU receipt compares resumed IDs with uninterrupted decoding
+and the independent greedy reference; browser durable execution is unqualified.
+
 The `actor` feature compiles for wasm, but its Armillary thread actor requires
 a host executor at runtime. See the
 [feature and target matrix](design_docs/2026-08-09_feature_target_matrix.md)

@@ -10,10 +10,11 @@ keywords = ["inference", "embeddings", "local", "webgpu", "retrieval"]
 categories = ["science", "api-bindings", "data-structures"]
 
 [dependencies]
+zeroize = "1"
 serde = { version = "1", features = ["derive"] }
 
 # Typed-payload persistence for `embed::VectorIndex` (2026-08-12 eidetic
-# reorg). Optional, so the default tree stays serde-only and portable: a
+# reorg). Optional, so the default tree stays serde/zeroize-only and portable: a
 # consumer that only computes embeddings never links the store.
 eidetic = { path = "../../eidetic/eidetic-core", version = "0.0.2", optional = true }
 

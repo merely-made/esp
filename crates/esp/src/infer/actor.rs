@@ -31,7 +31,9 @@ use std::sync::mpsc::Receiver;
 use armillary::actor::spawn_named;
 use armillary::{ActorHandle, Wake};
 
-use crate::infer::provider::{GenerationRequest, InferError, InferenceProvider, ModelCapability};
+use crate::infer::provider::{
+    GenerationCheckpoint, GenerationRequest, InferError, InferenceProvider, ModelCapability,
+};
 
 /// Commands the kernel sends the inference actor.
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +44,14 @@ pub enum InferCommand {
     /// Cancel request `id`: stops it mid-stream if running, drops it if
     /// still queued. Unknown/finished ids are ignored.
     Cancel { id: u64 },
+    /// Durable generation, or continuation from an exact checkpoint.
+    Checkpointed {
+        id: u64,
+        request: GenerationRequest,
+        resume: Option<GenerationCheckpoint>,
+    },
+    /// Pause at the next committed token boundary. Resume is a new Checkpointed command.
+    Pause { id: u64 },
 }
 
 /// Updates the actor streams back to the kernel.
@@ -60,6 +70,13 @@ pub enum InferUpdate {
     Started { id: u64 },
     /// One streamed fragment of generation `id`, in production order.
     Fragment { id: u64, text: String },
+    /// A durable checkpoint has committed before this update is emitted.
+    Checkpoint {
+        id: u64,
+        checkpoint: GenerationCheckpoint,
+    },
+    /// The generation stopped at a durable token boundary.
+    Paused { id: u64 },
     /// Generation `id` completed; `text` is the full assembled output.
     Finished { id: u64, text: String },
     /// Generation `id` was cancelled (mid-stream or while queued).
@@ -90,6 +107,20 @@ pub fn spawn_inference_actor_fallible<F>(
 where
     F: FnOnce() -> Result<Box<dyn InferenceProvider>, InferError> + Send + 'static,
 {
+    spawn_inference_actor_with_checkpoints(wake, build, |_, _| Ok(()))
+}
+
+/// A durable host supplies a synchronous commit barrier. No checkpoint update
+/// or subsequent token can escape a failed commit.
+pub fn spawn_inference_actor_with_checkpoints<F, C>(
+    wake: Wake,
+    build: F,
+    mut commit: C,
+) -> (ActorHandle<InferCommand>, Receiver<InferUpdate>)
+where
+    F: FnOnce() -> Result<Box<dyn InferenceProvider>, InferError> + Send + 'static,
+    C: FnMut(u64, &GenerationCheckpoint) -> Result<(), InferError> + Send + 'static,
+{
     spawn_named::<InferCommand, InferUpdate, _>("infer", wake, move |commands, out| {
         let provider = build();
         match &provider {
@@ -106,8 +137,10 @@ where
             }),
         }
 
-        let mut pending: VecDeque<(u64, GenerationRequest)> = VecDeque::new();
+        let mut pending: VecDeque<(u64, GenerationRequest, Option<Option<GenerationCheckpoint>>)> =
+            VecDeque::new();
         let mut cancelled: HashSet<u64> = HashSet::new();
+        let mut paused: HashSet<u64> = HashSet::new();
 
         loop {
             // Refill the queue: block for one command when idle (a closed
@@ -117,58 +150,88 @@ where
             // blocking recv above ends the loop afterwards.
             if pending.is_empty() {
                 match commands.recv() {
-                    Ok(c) => absorb(c, &mut pending, &mut cancelled),
+                    Ok(c) => absorb(c, &mut pending, &mut cancelled, &mut paused),
                     Err(_) => break,
                 }
             }
             while let Ok(c) = commands.try_recv() {
-                absorb(c, &mut pending, &mut cancelled);
+                absorb(c, &mut pending, &mut cancelled, &mut paused);
             }
 
-            let Some((id, request)) = pending.pop_front() else {
+            let Some((id, mut request, checkpointed)) = pending.pop_front() else {
                 continue;
             };
             if cancelled.remove(&id) {
+                request.clear_private();
                 out.emit(InferUpdate::Cancelled { id });
                 continue;
             }
 
+            if paused.remove(&id) {
+                request.clear_private();
+                out.emit(InferUpdate::Paused { id });
+                continue;
+            }
             out.emit(InferUpdate::Started { id });
             let streamed = out.clone();
             let mut was_cancelled = false;
+            let mut was_paused = false;
+            let mut should_stop = || {
+                while let Ok(c) = commands.try_recv() {
+                    absorb(c, &mut pending, &mut cancelled, &mut paused);
+                }
+                was_cancelled |= cancelled.remove(&id);
+                was_paused |= paused.remove(&id);
+                was_cancelled || was_paused
+            };
             let result = provider
                 .as_ref()
                 .map_err(Clone::clone)
                 .and_then(|provider| {
-                    provider.generate_streaming_controlled(
-                        &request,
-                        &mut |fragment| {
-                            streamed.emit(InferUpdate::Fragment {
-                                id,
-                                text: fragment.to_string(),
-                            });
-                            ControlFlow::Continue(())
-                        },
-                        &mut || {
-                            if was_cancelled {
-                                return true;
-                            }
-                            // Drain commands mid-stream so a Cancel can land while
-                            // tokens flow; other commands queue for later.
-                            loop {
-                                match commands.try_recv() {
-                                    Ok(c) => absorb(c, &mut pending, &mut cancelled),
-                                    Err(_) => break,
+                    if let Some(resume) = checkpointed {
+                        provider
+                            .generate_checkpointed(
+                                &request,
+                                resume.as_ref(),
+                                &mut |checkpoint| {
+                                    commit(id, checkpoint)?;
+                                    streamed.emit(InferUpdate::Checkpoint {
+                                        id,
+                                        checkpoint: checkpoint.clone(),
+                                    });
+                                    Ok(())
+                                },
+                                &mut should_stop,
+                            )
+                            .map(|checkpoint| {
+                                if checkpoint.complete {
+                                    checkpoint.text.clone()
+                                } else {
+                                    String::new()
                                 }
-                            }
-                            if cancelled.remove(&id) {
-                                was_cancelled = true;
-                                return true;
-                            }
-                            false
-                        },
-                    )
+                            })
+                    } else {
+                        provider.generate_streaming_controlled(
+                            &request,
+                            &mut |fragment| {
+                                streamed.emit(InferUpdate::Fragment {
+                                    id,
+                                    text: fragment.to_string(),
+                                });
+                                ControlFlow::Continue(())
+                            },
+                            &mut should_stop,
+                        )
+                    }
                 });
+            request.clear_private();
+            if was_paused
+                && !was_cancelled
+                && (result.is_ok() || matches!(result, Err(InferError::Interrupted)))
+            {
+                out.emit(InferUpdate::Paused { id });
+                continue;
+            }
             match (was_cancelled, result) {
                 (true, _) => out.emit(InferUpdate::Cancelled { id }),
                 (false, Ok(text)) => out.emit(InferUpdate::Finished { id, text }),
@@ -180,11 +243,26 @@ where
 
 fn absorb(
     command: InferCommand,
-    pending: &mut VecDeque<(u64, GenerationRequest)>,
+    pending: &mut VecDeque<(u64, GenerationRequest, Option<Option<GenerationCheckpoint>>)>,
     cancelled: &mut HashSet<u64>,
+    paused: &mut HashSet<u64>,
 ) {
     match command {
-        InferCommand::Generate { id, request } => pending.push_back((id, request)),
+        InferCommand::Generate { id, request } => {
+            paused.remove(&id);
+            pending.push_back((id, request, None));
+        },
+        InferCommand::Checkpointed {
+            id,
+            request,
+            resume,
+        } => {
+            paused.remove(&id);
+            pending.push_back((id, request, Some(resume)));
+        },
+        InferCommand::Pause { id } => {
+            paused.insert(id);
+        },
         InferCommand::Cancel { id } => {
             cancelled.insert(id);
         },

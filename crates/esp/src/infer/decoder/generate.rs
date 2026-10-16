@@ -27,7 +27,7 @@ pub enum TokenPicker {
 }
 
 impl TokenPicker {
-    fn pick(&mut self, logits: &Tensor<3>) -> u32 {
+    pub(crate) fn pick(&mut self, logits: &Tensor<3>) -> u32 {
         match self {
             TokenPicker::Greedy => argmax_last(logits),
             TokenPicker::Sampled(sampler) => {
