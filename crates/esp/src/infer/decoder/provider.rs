@@ -24,7 +24,7 @@ use std::ops::ControlFlow;
 use tokenizers::Tokenizer;
 
 use super::config::DecoderConfig;
-use super::generate::{TokenPicker, generate_ids_with, generate_ids_with_async_controlled};
+use super::generate::{TokenPicker, generate_ids_with_async_controlled, try_generate_ids_with};
 use super::loader::load_decoder_from_bytes;
 use super::model::DecoderModel;
 use super::sample::{Sampler, SplitMix64};
@@ -211,6 +211,10 @@ impl DecoderProvider {
         self
     }
 
+    pub fn streaming_stats(&self) -> Option<super::streaming::StreamingReadStats> {
+        self.model.streaming_stats()
+    }
+
     /// Build from the HF artifact triple as byte buffers — the shape
     /// eidetic's `ModelComponents` resolves to (P2), and what a model
     /// directory reads into.
@@ -226,6 +230,39 @@ impl DecoderProvider {
         let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
             .map_err(|e| InferError::InvalidConfig(format!("tokenizer.json parse: {e}")))?;
         let model = load_decoder_from_bytes(&config, weights_bytes, device)?;
+        Ok(Self::from_parts(model, tokenizer, model_id, loader))
+    }
+
+    /// Build a provider from the resident shared artifact and a source of
+    /// independently verified layers. The ordinary tokenizer and generation
+    /// checkpoint paths are used unchanged.
+    pub fn from_layer_source(
+        config_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        shared_bytes: &[u8],
+        source: Box<dyn super::streaming::LayerSource>,
+        options: super::streaming::StreamingOptions,
+        model_id: impl Into<String>,
+        loader: impl Into<String>,
+        device: &Device,
+    ) -> Result<Self, InferError> {
+        let config = DecoderConfig::from_json_bytes(config_bytes)?;
+        let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
+            .map_err(|error| InferError::InvalidConfig(format!("tokenizer: {error}")))?;
+        let tensors = safetensors::SafeTensors::deserialize(shared_bytes)
+            .map_err(|error| InferError::InvalidWeights(format!("shared tensors: {error}")))?;
+        if tensors.names().iter().any(|name| {
+            !matches!(
+                name.as_str(),
+                "model.embed_tokens.weight" | "model.norm.weight" | "lm_head.weight"
+            )
+        }) {
+            return Err(InferError::InvalidWeights(
+                "unexpected tensor in shared artifact".into(),
+            ));
+        }
+        let shared = super::loader::load_decoder_shared_tensors(&config, &tensors, device)?;
+        let model = DecoderModel::from_layer_source(config, shared, source, options, device)?;
         Ok(Self::from_parts(model, tokenizer, model_id, loader))
     }
 
@@ -248,13 +285,13 @@ impl DecoderProvider {
             });
         }
         let input: Vec<i32> = prompt_ids.iter().map(|&token| token as i32).collect();
-        let logits = self.model.logits(
+        let logits = self.model.try_forward_cached_last(
             Tensor::<2, Int>::from_data(
                 TensorData::new(input, [1, prompt_ids.len()]),
                 &self.model.device(),
             ),
-            0,
-        );
+            &mut self.model.new_cache(),
+        )?;
         let [_, sequence, vocabulary] = logits.dims();
         logits
             .slice([0..1, (sequence - 1)..sequence, 0..vocabulary])
@@ -327,14 +364,14 @@ impl DecoderProvider {
     ) -> Result<DecoderGeneration, InferError> {
         let (prompt_ids, max_new, mut picker) = self.prepare_generation(request)?;
         let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
-        let token_ids = generate_ids_with(
+        let token_ids = try_generate_ids_with(
             &self.model,
             &prompt_ids,
             max_new,
             &self.model.config().eos_token_id,
             &mut picker,
             &mut |token| observer.observe(token),
-        );
+        )?;
         observer.finish(token_ids, false)
     }
 
@@ -466,7 +503,7 @@ impl InferenceProvider for DecoderProvider {
             ),
             &device,
         );
-        let mut logits = self.model.forward_cached(input, &mut cache);
+        let mut logits = self.model.try_forward_cached_last(input, &mut cache)?;
         while cp.token_ids.len() < max_new {
             // No draw is spent on a paused, cancelled or stopped device.
             if stop() {
@@ -494,7 +531,7 @@ impl InferenceProvider for DecoderProvider {
             }
             let step: Tensor<2, Int> =
                 Tensor::from_data(TensorData::new(vec![token as i32], [1, 1]), &device);
-            logits = self.model.forward_cached(step, &mut cache);
+            logits = self.model.try_forward_cached_last(step, &mut cache)?;
         }
         cp.complete = true;
         commit(&cp)?;

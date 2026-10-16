@@ -1,0 +1,107 @@
+{
+  "model_id": "openlm-research/open_llama_3b_v2",
+  "revision": "bce5d60d3b0c68318862270ec4e794d83308d80a",
+  "torch": "2.14.1+cpu",
+  "transformers": "4.57.6",
+  "dtype": "float32",
+  "attention": "eager",
+  "max_tokens": 8,
+  "temperature": 0,
+  "artifacts": {
+    "config.json": "c92b16f305e2a41c27bcc8ff882499f3c9fe7253ca1eeda2573850d7998ee2af",
+    "tokenizer.json": "ffb5089ba63a221d2ad044e760fcd7673fb89cc3cbd80e45bf147d08afd52eda",
+    "tokenizer_config.json": "5e7461292ef8b6b5f9d5ec40f61e5c783b0e26ac960f85cf70b552a4802af84d",
+    "model.safetensors.index.json": "23786754882feecd80222ad117b511b55b1271ed50a1ca0b3c434793ede61ad4",
+    "model-00001-of-00007.safetensors": "20a110f427e02cf7e46dbaba57af9d39685a965fb7f8aae1cc892a9ce86e02d3",
+    "model-00002-of-00007.safetensors": "7163612bc528bf18a0aa74416dc821130743142346040e802cab6847cf0c5243",
+    "model-00003-of-00007.safetensors": "23ba30a7b60f35b86689a46506073d872971b143df0128c234beccb48bdf2454",
+    "model-00004-of-00007.safetensors": "db0c1f3eed8edfb35fdf8861a95d575583fe55e5040955607b08c65ba850ec0a",
+    "model-00005-of-00007.safetensors": "954ce343edadb79f30b22ae1925bab1d5d683460e47e67be357a010bf30b92d5",
+    "model-00006-of-00007.safetensors": "cc1fc9bc85b7730e92b4fbf042232d6bc0fd418612faccbc52981cae09a7b3cf",
+    "model-00007-of-00007.safetensors": "05bee4fee694c922727c32d86dba697ee4dfae51e7311a21a6273285c851611a"
+  },
+  "rows": [
+    {
+      "question": "What is the capital of France?",
+      "prompt": "<s>Question: What is the capital of France?\nAnswer:",
+      "prompt_ids": [
+        1,
+        28629,
+        29537,
+        1200,
+        325,
+        268,
+        4739,
+        296,
+        6110,
+        29584,
+        13,
+        26980,
+        266,
+        29537
+      ],
+      "token_ids": [
+        7002,
+        13,
+        28629,
+        29537,
+        1200,
+        325,
+        268,
+        4739
+      ],
+      "text": "Paris\nQuestion: What is the capital",
+      "seconds": 4.859000000054948
+    },
+    {
+      "question": "What is two plus two?",
+      "prompt": "<s>Question: What is two plus two?\nAnswer:",
+      "prompt_ids": [
+        1,
+        28629,
+        29537,
+        1200,
+        325,
+        846,
+        4334,
+        846,
+        29584,
+        13,
+        26980,
+        266,
+        29537
+      ],
+      "token_ids": [
+        7531,
+        29520,
+        13,
+        28629,
+        29537,
+        1200,
+        325,
+        846
+      ],
+      "text": "Four.\nQuestion: What is two",
+      "seconds": 4.172000000020489
+    }
+  ],
+  "resident_f32_weight_bytes": 13705894400,
+  "conversion": {
+    "model_id": "openlm-research/open_llama_3b_v2",
+    "revision": "bce5d60d3b0c68318862270ec4e794d83308d80a",
+    "upstream_sha256": {
+      "config.json": "c92b16f305e2a41c27bcc8ff882499f3c9fe7253ca1eeda2573850d7998ee2af",
+      "tokenizer.model": "91b289e85fa20fd375d8b33dc12f77616f18abc6359804471d1fafcb425fecb8",
+      "pytorch_model.bin": "32268cfa47263b8abef86c9238e3ec7d64faabde504413b8e0a4d56002d76ec0"
+    },
+    "weight_bytes": 6852952400,
+    "shards": 7,
+    "dtype_preserved": true,
+    "torch": "2.14.1+cpu",
+    "transformers": "4.57.6",
+    "fixed_prompt_fast_slow_tokenizer_parity": true
+  },
+  "process_peak_working_set_bytes": 14609170432,
+  "host_memory_bytes": 33515835392,
+  "template_sha256": "55267a40f2712b8db72366a418a67f0d54b311e546ed5a337a68106673e7badd"
+}

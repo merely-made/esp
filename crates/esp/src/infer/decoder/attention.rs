@@ -22,7 +22,7 @@
 //! cached path is proven equal to naive full recompute by the
 //! generation tests.
 
-use burn::nn::{Linear, LinearConfig};
+use burn::nn::Linear;
 use burn::tensor::activation::softmax;
 use burn::tensor::{Bool, Device, Tensor, TensorData};
 
@@ -133,11 +133,13 @@ impl LayerKvCache {
 ///
 /// The weight is adopted as-is with [`adopt_param`], never re-marked a
 /// tracked leaf; see that function for why.
-pub(crate) fn linear_no_bias_from_loaded(weight: Tensor<2>, device: &Device) -> Linear {
-    let [d_in, d_out] = weight.dims();
-    let mut linear = LinearConfig::new(d_in, d_out).with_bias(false).init(device);
-    linear.weight = adopt_param(weight);
-    linear
+pub(crate) fn linear_no_bias_from_loaded(weight: Tensor<2>, _device: &Device) -> Linear {
+    // Adopt directly: random initialization followed by replacement would
+    // allocate throwaway matrices on every streamed layer load.
+    Linear {
+        weight: adopt_param(weight),
+        bias: None,
+    }
 }
 
 /// Wrap an already-materialized tensor as a module parameter **without**
@@ -215,6 +217,22 @@ impl DecoderAttention {
         cache: &mut LayerKvCache,
         start: usize,
     ) -> Tensor<3> {
+        let query_chunk = x.dims()[1];
+        self.forward_cached_chunked(x, rope, cache, start, query_chunk)
+            .expect("resident attention forward")
+    }
+
+    /// Bound the attention score allocation to `query_chunk` query positions.
+    /// Keys and values are projected once and retained in the ordinary cache.
+    pub fn forward_cached_chunked(
+        &self,
+        x: Tensor<3>,
+        rope: &LlamaRotaryEncoding,
+        cache: &mut LayerKvCache,
+        start: usize,
+        query_chunk: usize,
+    ) -> Result<Tensor<3>, crate::infer::InferError> {
+        assert!(query_chunk > 0, "query chunk must be positive");
         let [batch, seq, hidden] = x.dims();
         let past = cache.cached_len();
         assert!(
@@ -258,23 +276,48 @@ impl DecoderAttention {
         // Scaled dot-product; causal mask only when the query block has
         // more than one position (a single decode step attends its whole
         // past by construction).
-        let mut scores = q
-            .matmul(k_all.swap_dims(2, 3))
-            .div_scalar((self.head_dim as f32).sqrt());
-        if seq > 1 {
-            let mask = Tensor::<2, Bool>::tril_mask([seq, total], past as i64, &device)
-                .unsqueeze::<4>()
-                .expand([batch, self.n_heads, seq, total]);
-            scores = scores.mask_fill(mask, f32::NEG_INFINITY);
+        let keys = k_all.swap_dims(2, 3);
+        let mut chunks = Vec::new();
+        for first in (0..seq).step_by(query_chunk) {
+            let end = first.saturating_add(query_chunk).min(seq);
+            let count = end - first;
+            let queries =
+                q.clone()
+                    .slice([0..batch, 0..self.n_heads, first..end, 0..self.head_dim]);
+            let mut scores = queries
+                .matmul(keys.clone())
+                .div_scalar((self.head_dim as f32).sqrt());
+            if seq > 1 {
+                let mask =
+                    Tensor::<2, Bool>::tril_mask([count, total], (past + first) as i64, &device)
+                        .unsqueeze::<4>()
+                        .expand([batch, self.n_heads, count, total]);
+                scores = scores.mask_fill(mask, f32::NEG_INFINITY);
+            }
+            let out = softmax(scores, 3)
+                .matmul(v_all.clone())
+                .swap_dims(1, 2)
+                .reshape([batch, count, hidden]);
+            // Force each chunk before building the next. Lazy GPU graphs must
+            // not retain a score allocation for every query chunk at once.
+            if query_chunk < seq {
+                // Device::sync drains Burn's fusion stream before waiting for
+                // the backend. Keep the bounded chunk on-device without a
+                // host copy of private hidden states.
+                device.sync().map_err(|error| {
+                    crate::infer::InferError::Backend(format!(
+                        "drain attention query chunk: {error}"
+                    ))
+                })?;
+            }
+            chunks.push(out);
         }
-        let attn = softmax(scores, 3);
-
-        // Weighted values back to [b, s, hidden], through the output proj.
-        let out = attn
-            .matmul(v_all)
-            .swap_dims(1, 2)
-            .reshape([batch, seq, hidden]);
-        self.o_proj.forward(out)
+        let out = if chunks.len() == 1 {
+            chunks.pop().unwrap()
+        } else {
+            Tensor::cat(chunks, 1)
+        };
+        Ok(self.o_proj.forward(out))
     }
 }
 
@@ -306,6 +349,50 @@ mod tests {
             t2(h, h, 14, &dev),
             &dev,
         )
+    }
+
+    #[test]
+    fn chunked_queries_match_full_causal_prefill_and_warm_decode() {
+        let config = tiny_config();
+        let attention = attention(&config);
+        let rope = rope(&config);
+        let device = Device::ndarray();
+        let x = t2(7, config.hidden_size, 19, &device).reshape([1, 7, config.hidden_size]);
+        let next = t2(1, config.hidden_size, 21, &device).reshape([1, 1, config.hidden_size]);
+        for chunk in [1, 2, 3, 7] {
+            let mut a_cache = LayerKvCache::default();
+            let mut b_cache = LayerKvCache::default();
+            let a = attention
+                .forward_cached(x.clone(), &rope, &mut a_cache, 0)
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap();
+            let b = attention
+                .forward_cached_chunked(x.clone(), &rope, &mut b_cache, 0, chunk)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap();
+            assert!(
+                a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6),
+                "chunk {chunk}"
+            );
+            let a = attention
+                .forward_cached(next.clone(), &rope, &mut a_cache, 7)
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap();
+            let b = attention
+                .forward_cached_chunked(next.clone(), &rope, &mut b_cache, 7, chunk)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap();
+            assert!(
+                a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6),
+                "warm chunk {chunk}"
+            );
+        }
     }
 
     #[test]

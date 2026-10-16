@@ -34,7 +34,7 @@ fn view<'a>(tensors: &'a SafeTensors<'_>, name: &str) -> Result<TensorView<'a>, 
 
 /// The per-layer tensors the Llama block consumes, under
 /// `model.layers.{i}.`; the loader below reads exactly these.
-const LAYER_TENSORS: [&str; 9] = [
+pub(crate) const LAYER_TENSORS: [&str; 9] = [
     "input_layernorm.weight",
     "self_attn.q_proj.weight",
     "self_attn.k_proj.weight",
@@ -120,69 +120,22 @@ pub(crate) fn load_decoder_tensors_from_bytes(
         .map_err(|e| InferError::InvalidWeights(format!("safetensors parse: {e}")))?;
     refuse_unconsumed(config, &tensors)?;
 
-    let h = config.hidden_size;
-    let kv = config.kv_heads() * config.head_dim();
-    let inter = config.intermediate_size;
-
     let mut layers = Vec::with_capacity(config.num_hidden_layers);
     for i in 0..config.num_hidden_layers {
-        let p = format!("model.layers.{i}");
-        layers.push(LoadedDecoderLayer {
-            input_norm_gamma: extract_1d(
-                &view(&tensors, &format!("{p}.input_layernorm.weight"))?,
-                h,
-                device,
-            )?,
-            q_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.self_attn.q_proj.weight"))?,
-                h,
-                h,
-                device,
-            )?,
-            k_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.self_attn.k_proj.weight"))?,
-                kv,
-                h,
-                device,
-            )?,
-            v_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.self_attn.v_proj.weight"))?,
-                kv,
-                h,
-                device,
-            )?,
-            o_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.self_attn.o_proj.weight"))?,
-                h,
-                h,
-                device,
-            )?,
-            post_norm_gamma: extract_1d(
-                &view(&tensors, &format!("{p}.post_attention_layernorm.weight"))?,
-                h,
-                device,
-            )?,
-            gate_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.mlp.gate_proj.weight"))?,
-                inter,
-                h,
-                device,
-            )?,
-            up_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.mlp.up_proj.weight"))?,
-                inter,
-                h,
-                device,
-            )?,
-            down_w: extract_2d_transposed(
-                &view(&tensors, &format!("{p}.mlp.down_proj.weight"))?,
-                h,
-                inter,
-                device,
-            )?,
-        });
+        layers.push(load_decoder_layer(config, &tensors, i, device)?);
     }
 
+    let mut shared = load_decoder_shared_tensors(config, &tensors, device)?;
+    shared.layers = layers;
+    Ok(shared)
+}
+
+pub(crate) fn load_decoder_shared_tensors(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    device: &Device,
+) -> Result<LoadedDecoder, InferError> {
+    let h = config.hidden_size;
     let lm_head_w = match tensors.tensor("lm_head.weight") {
         Ok(v) => Some(extract_2d_transposed(&v, config.vocab_size, h, device)?),
         Err(_) if config.tie_word_embeddings => None,
@@ -200,9 +153,76 @@ pub(crate) fn load_decoder_tensors_from_bytes(
             h,
             device,
         )?,
-        layers,
+        layers: Vec::new(),
         final_norm_gamma: extract_1d(&view(&tensors, "model.norm.weight")?, h, device)?,
         lm_head_w,
+    })
+}
+
+/// Decode one layer without constructing tensors for any other layer.
+pub(crate) fn load_decoder_layer(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    i: usize,
+    device: &Device,
+) -> Result<LoadedDecoderLayer, InferError> {
+    let h = config.hidden_size;
+    let kv = config.kv_heads() * config.head_dim();
+    let inter = config.intermediate_size;
+    let p = format!("model.layers.{i}");
+    Ok(LoadedDecoderLayer {
+        input_norm_gamma: extract_1d(
+            &view(&tensors, &format!("{p}.input_layernorm.weight"))?,
+            h,
+            device,
+        )?,
+        q_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.self_attn.q_proj.weight"))?,
+            h,
+            h,
+            device,
+        )?,
+        k_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.self_attn.k_proj.weight"))?,
+            kv,
+            h,
+            device,
+        )?,
+        v_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.self_attn.v_proj.weight"))?,
+            kv,
+            h,
+            device,
+        )?,
+        o_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.self_attn.o_proj.weight"))?,
+            h,
+            h,
+            device,
+        )?,
+        post_norm_gamma: extract_1d(
+            &view(&tensors, &format!("{p}.post_attention_layernorm.weight"))?,
+            h,
+            device,
+        )?,
+        gate_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.mlp.gate_proj.weight"))?,
+            inter,
+            h,
+            device,
+        )?,
+        up_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.mlp.up_proj.weight"))?,
+            inter,
+            h,
+            device,
+        )?,
+        down_w: extract_2d_transposed(
+            &view(&tensors, &format!("{p}.mlp.down_proj.weight"))?,
+            h,
+            inter,
+            device,
+        )?,
     })
 }
 
@@ -217,7 +237,7 @@ pub fn load_decoder_from_bytes(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::test_support::{det_vec, tiny_config};
     use super::*;
     use burn::tensor::{Int, Tensor};
@@ -227,7 +247,7 @@ mod tests {
 
     /// The full name → (shape, values) table for `tiny_config`, values
     /// deterministic per tensor.
-    fn tiny_tensor_table(
+    pub(crate) fn tiny_tensor_table(
         config: &DecoderConfig,
         with_lm_head: bool,
     ) -> Vec<(String, Vec<usize>, Vec<f32>)> {
@@ -268,7 +288,7 @@ mod tests {
         out
     }
 
-    fn serialize_f32(table: &[(String, Vec<usize>, Vec<f32>)]) -> Vec<u8> {
+    pub(crate) fn serialize_f32(table: &[(String, Vec<usize>, Vec<f32>)]) -> Vec<u8> {
         let buffers: Vec<(String, Vec<usize>, Vec<u8>)> = table
             .iter()
             .map(|(n, s, v)| {
@@ -460,4 +480,22 @@ mod tests {
             other => panic!("wrong error: {other:?}"),
         }
     }
+}
+
+/// A streamed layer artifact must contain exactly this layer's nine tensors.
+pub(crate) fn validate_layer_names(
+    tensors: &SafeTensors<'_>,
+    index: usize,
+) -> Result<(), InferError> {
+    let expected: HashSet<String> = LAYER_TENSORS
+        .iter()
+        .map(|suffix| format!("model.layers.{index}.{suffix}"))
+        .collect();
+    let actual: HashSet<String> = tensors.names().into_iter().cloned().collect();
+    if actual != expected {
+        return Err(InferError::InvalidWeights(format!(
+            "layer {index} tensor names do not match the declared Llama block"
+        )));
+    }
+    Ok(())
 }

@@ -15,7 +15,7 @@
 //! `mlp.gate_proj` → SwiGlu inner (the silu side), `mlp.up_proj` → SwiGlu
 //! outer, `mlp.down_proj` → `down`.
 
-use burn::nn::{Linear, RmsNorm, RmsNormConfig, SwiGlu, SwiGluConfig};
+use burn::nn::{Linear, RmsNorm, SwiGlu};
 use burn::tensor::{Device, Tensor};
 
 use super::attention::{
@@ -24,22 +24,22 @@ use super::attention::{
 use super::config::DecoderConfig;
 
 /// Build an `RmsNorm` whose gamma is the supplied tensor.
-pub(crate) fn rms_norm_from_loaded(gamma: Tensor<1>, epsilon: f64, device: &Device) -> RmsNorm {
-    let [size] = gamma.dims();
-    let mut norm = RmsNormConfig::new(size).with_epsilon(epsilon).init(device);
-    norm.gamma = adopt_param(gamma);
-    norm
+pub(crate) fn rms_norm_from_loaded(gamma: Tensor<1>, epsilon: f64, _device: &Device) -> RmsNorm {
+    assert!(epsilon > 0.0, "epsilon must be positive");
+    RmsNorm {
+        gamma: adopt_param(gamma),
+        epsilon,
+    }
 }
 
 /// Build a `SwiGlu` from pre-loaded gate/up weights (`[hidden, inter]`,
 /// bias-free). Gate drives the silu side (`linear_inner`), up the
 /// element-wise side (`linear_outer`) — the HF llama convention.
 pub(crate) fn swiglu_from_loaded(gate_w: Tensor<2>, up_w: Tensor<2>, device: &Device) -> SwiGlu {
-    let [d_in, d_out] = gate_w.dims();
-    let mut swiglu = SwiGluConfig::new(d_in, d_out).with_bias(false).init(device);
-    swiglu.linear_inner = linear_no_bias_from_loaded(gate_w, device);
-    swiglu.linear_outer = linear_no_bias_from_loaded(up_w, device);
-    swiglu
+    SwiGlu {
+        linear_inner: linear_no_bias_from_loaded(gate_w, device),
+        linear_outer: linear_no_bias_from_loaded(up_w, device),
+    }
 }
 
 /// One transformer layer of the decoder.
@@ -101,14 +101,32 @@ impl DecoderLayer {
         cache: &mut super::attention::LayerKvCache,
         start: usize,
     ) -> Tensor<3> {
+        let query_chunk = x.dims()[1];
+        self.forward_cached_chunked(x, rope, cache, start, query_chunk)
+            .expect("resident layer forward")
+    }
+
+    /// Cached forward with a bounded attention score block during prefill.
+    pub fn forward_cached_chunked(
+        &self,
+        x: Tensor<3>,
+        rope: &LlamaRotaryEncoding,
+        cache: &mut super::attention::LayerKvCache,
+        start: usize,
+        query_chunk: usize,
+    ) -> Result<Tensor<3>, crate::infer::InferError> {
         let h = x.clone()
-            + self
-                .attention
-                .forward_cached(self.input_norm.forward(x), rope, cache, start);
+            + self.attention.forward_cached_chunked(
+                self.input_norm.forward(x),
+                rope,
+                cache,
+                start,
+                query_chunk,
+            )?;
         let mlp = self
             .down
             .forward(self.mlp.forward(self.post_norm.forward(h.clone())));
-        h + mlp
+        Ok(h + mlp)
     }
 }
 

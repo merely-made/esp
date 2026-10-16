@@ -29,6 +29,8 @@ pub mod actor;
 #[cfg(feature = "decoder")]
 pub mod decoder;
 #[cfg(all(feature = "decoder", feature = "model-session"))]
+pub mod layer_library;
+#[cfg(all(feature = "decoder", feature = "model-session"))]
 pub mod library;
 #[cfg(feature = "model-session")]
 pub mod prompt;
