@@ -77,7 +77,7 @@ Q8 and Q4 projections are quantized once in HF output-row order, with signed
 integers packed into little-endian u32 words and one f32 scale per 32 input
 weights within each output row.
 Their embeddings and norms remain f16, including a tied output head. Projection
-input and output widths must be divisible by 32. The runtime reads these stored buffers
+input widths must be divisible by 32; output widths need not be. The runtime reads these stored buffers
 directly, transposes their metadata and multiplies packed weights in the GPU kernel.
 
 `decoder-flex` enables CPU f16/bf16. The wgpu row supports f16 and the packed
@@ -93,7 +93,9 @@ against the same source checkpoint's bf16 row on exact rendered prompts,
 next-token logit RMSE and maximum error, generated token ids, and memory and
 streaming costs. `qualify_formatted_model` publishes the measured envelope;
 `qualify_inference_model LIBRARY_REDB CANDIDATE_ROW QUALIFICATION_JSON` exposes
-that operation as a host command. Qualification is specific to its measured
+that operation as a host command. The current GPU qualification uses Mere's
+root `cubek-matmul` patch; embedding hosts must carry that patch in their own
+Cargo root to reproduce the Q4 workgroup-memory row. Qualification is specific to its measured
 loader. `/layer-stream-v2/<format>` and the format field enter session identity;
 a format change refuses an existing checkpoint. Payload byte counts exclude
 allocator overhead, temporary compute buffers, activations and KV caches.
