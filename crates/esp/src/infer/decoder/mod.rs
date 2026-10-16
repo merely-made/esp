@@ -37,6 +37,7 @@ pub mod lora;
 pub mod model;
 pub mod provider;
 pub mod sample;
+pub mod stage;
 pub mod streaming;
 pub mod tensors;
 pub mod weight_format;

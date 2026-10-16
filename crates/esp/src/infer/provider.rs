@@ -123,6 +123,9 @@ pub enum InferError {
     Interrupted,
     /// The underlying runtime (Burn / CPU / wgpu / native engine) failed.
     Backend(String),
+    /// A leased stage could not complete a hidden-state call. A host may
+    /// checkpoint and retry the same session on another execution placement.
+    StageUnavailable(String),
     /// The request itself is invalid (empty prompt, zero max_tokens, ...).
     InvalidRequest(String),
     /// A model config could not be parsed or is internally inconsistent.
@@ -145,6 +148,7 @@ impl std::fmt::Display for InferError {
             InferError::Interrupted => write!(f, "generation interrupted at a token boundary"),
             InferError::ModelNotLoaded => write!(f, "model not loaded"),
             InferError::Backend(msg) => write!(f, "backend: {msg}"),
+            InferError::StageUnavailable(msg) => write!(f, "stage unavailable: {msg}"),
             InferError::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
             InferError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             InferError::InvalidWeights(msg) => write!(f, "invalid weights: {msg}"),
@@ -170,6 +174,10 @@ pub struct SessionIdentity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationCheckpoint {
+    /// Placement changes already committed before retrying a token. This does
+    /// not weaken the exact session guard or include remote KV state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placements: Vec<ExecutionPlacement>,
     pub session: Option<SessionIdentity>,
     pub request: GenerationRequest,
     pub prompt_ids: Vec<u32>,
@@ -177,6 +185,15 @@ pub struct GenerationCheckpoint {
     pub draws: u64,
     pub text: String,
     pub complete: bool,
+}
+
+/// Durable provenance for a change in where the same session executes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionPlacement {
+    pub at_token: usize,
+    pub device: String,
+    pub reason: String,
 }
 
 impl Drop for GenerationCheckpoint {

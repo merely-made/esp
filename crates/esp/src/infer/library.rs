@@ -198,6 +198,17 @@ async fn resolve_library_row(
 }
 
 impl ResolvedInferenceRow {
+    /// Resident layer payload including KV at the declared context limit.
+    /// Hosts reserve remaining shared/backend memory before assigning ranges.
+    pub fn stage_layer_costs(&self) -> Result<Vec<u64>, InferError> {
+        let config =
+            super::decoder::DecoderConfig::from_json_bytes(&self.model.components.config_bytes)?;
+        let bytes = super::decoder::stage::layer_resident_bytes(
+            &config,
+            self.weight_format().unwrap_or_default(),
+        )?;
+        Ok(vec![bytes; config.num_hidden_layers])
+    }
     pub fn weight_format(&self) -> Option<WeightFormat> {
         self.formatted.as_ref().map(|index| index.format)
     }
@@ -284,6 +295,82 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Option<Box<dyn LayerSource>>,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
+        self.load_execution(device, loader, max_tokens, source, None)
+    }
+
+    /// The stage chain is a placement of this exact layer-indexed session.
+    /// It does not change the format, backend class or checkpoint identity.
+    pub fn load_with_stages(
+        &self,
+        device: &DecoderDevice,
+        loader: &str,
+        max_tokens: usize,
+        stages: Box<dyn super::decoder::stage::StageExecutor>,
+    ) -> Result<SessionProvider<DecoderProvider>, InferError> {
+        if stages.session_id() != Some(self.session(loader).id()?.to_string().as_str()) {
+            return Err(failure("stage chain belongs to another exact session"));
+        }
+        self.load_execution(
+            device,
+            loader,
+            max_tokens,
+            Some(Box::new(|_, _| {
+                Err(InferError::Backend(
+                    "staged provider must not stream local layers".into(),
+                ))
+            })),
+            Some(stages),
+        )
+    }
+
+    /// Load only this range from the library owner's verified source. The
+    /// caller keeps its mesh lease and hardware guard through drain and drop.
+    pub fn load_stage(
+        &self,
+        device: &DecoderDevice,
+        loader: &str,
+        range: super::decoder::stage::LayerRange,
+        source: &dyn LayerSource,
+    ) -> Result<super::decoder::stage::DecoderStage, InferError> {
+        self.validate_qualification(loader)?;
+        let index = self
+            .layered
+            .as_ref()
+            .ok_or_else(|| failure("stages require a layer index"))?;
+        let stage = super::decoder::stage::DecoderStage::from_source(
+            super::decoder::DecoderConfig::from_json_bytes(&self.model.components.config_bytes)?,
+            range,
+            source,
+            index.options.clone(),
+            self.weight_format().unwrap_or_default(),
+            device,
+        )?;
+        if range.end == index.layers.len() {
+            let tensors =
+                safetensors::SafeTensors::deserialize(&self.model.components.weight_bytes)
+                    .map_err(failure)?;
+            let shared = super::decoder::loader::load_decoder_shared_tensors_with_format(
+                &super::decoder::DecoderConfig::from_json_bytes(
+                    &self.model.components.config_bytes,
+                )?,
+                &tensors,
+                device,
+                self.weight_format().unwrap_or_default(),
+            )?;
+            stage.with_output(shared)
+        } else {
+            Ok(stage)
+        }
+    }
+
+    fn load_execution(
+        &self,
+        device: &DecoderDevice,
+        loader: &str,
+        max_tokens: usize,
+        source: Option<Box<dyn LayerSource>>,
+        stages: Option<Box<dyn super::decoder::stage::StageExecutor>>,
+    ) -> Result<SessionProvider<DecoderProvider>, InferError> {
         self.validate_qualification(loader)?;
         let provider = if let Some(index) = &self.layered {
             DecoderProvider::from_layer_source_with_format(
@@ -312,6 +399,11 @@ impl ResolvedInferenceRow {
             )?
         }
         .with_literal_prompt();
+        let provider = if let Some(stages) = stages {
+            provider.with_stages(stages)?
+        } else {
+            provider
+        };
         let session = self.session(loader);
         SessionProvider::new(
             BoundModelSession::bind(session, provider)?,
