@@ -64,8 +64,10 @@ layer before proceeding; generation applies the output head only to the final
 position. `streaming_stats` counts logical artifact bytes and layer reads,
 including OS-cache hits. These counters are not physical disk traffic or a
 process memory measurement. The real-model fixture is
-`tests/layer_streaming_real.rs`; the larger-than-device-memory I6 gate remains
-separate from its small-model reference and long-prefill checks.
+`tests/layer_streaming_real.rs`. I6 qualifies seven-shard OpenLlama 3B v2
+(13.71 GB of f32 weights on an 8 GB GPU), exact reference tokens and resumed
+tokens, plus a 4,126-token SmolLM2 prefill. The plan records memory, timing,
+logical I/O and the measurement boundaries.
 
 Providers expose cooperative cancellation separately from text fragments, so
 a host can cancel a device wait before generation starts. The LoRA trainer
