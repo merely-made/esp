@@ -107,6 +107,20 @@ a host can cancel a device wait before generation starts. The LoRA trainer
 arms also expose controlled entry points that check cancellation between
 bounded tensor operations; the original entry points retain their behavior.
 
+The decoder's `stage` module loads a contiguous range without retaining the
+full-model source. The final range also owns its norm/output head. Each stage keeps only its own KV
+and requires matching absolute positions, resetting on a complete prefill.
+`assign_ranges` uses host-provided resident payload budgets after shared and
+backend reservations; layer costs include KV at the declared context limit.
+The coordinator retains its embedding, and the final range returns a last-position
+f32 logits row for the coordinator to sample.
+`ResolvedInferenceRow::load_with_stages` checks the chain's exact session and
+preserves the local streamed loader identity, so placement can change without
+silently changing model, format or backend class. Distillery owns the iroh
+protocol, lease admission, private-data lock and recovery. ESP does not acquire
+remote weights or grant stage work. Checkpoints retain placement changes as
+optional provenance alongside the existing immutable session and sampling state.
+
 `InferenceProvider::generate_checkpointed` adds token-level durable generation
 for the decoder and session provider. It persists an actual seed before the
 first sampled token, resumes splitmix64 at the committed draw, and rebuilds KV

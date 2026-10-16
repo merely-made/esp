@@ -182,6 +182,15 @@ impl<'a> StreamObserver<'a> {
 }
 
 impl DecoderProvider {
+    /// Use a session-bound remote layer chain with this provider's ordinary
+    /// embedding, output head, tokenizer and checkpoint generation loop.
+    pub fn with_stages(
+        mut self,
+        stages: Box<dyn super::stage::StageExecutor>,
+    ) -> Result<Self, InferError> {
+        self.model = self.model.with_stages(stages)?;
+        Ok(self)
+    }
     /// Assemble from already-built parts (tests; pre-loaded models).
     pub fn from_parts(
         model: DecoderModel,
@@ -476,6 +485,7 @@ impl InferenceProvider for DecoderProvider {
         }
         let (prompt_ids, max_new, mut picker) = self.prepare_generation(&request)?;
         let mut cp = resume.cloned().unwrap_or_else(|| GenerationCheckpoint {
+            placements: Vec::new(),
             session: None,
             request: (*request).clone(),
             prompt_ids: prompt_ids.clone(),
