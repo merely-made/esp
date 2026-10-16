@@ -57,6 +57,9 @@ impl ModelCapability {
 pub struct GenerationRequest {
     /// The full prompt (any chat templating happens above this seam).
     pub prompt: String,
+    /// Retained context rendered only by a declared session template.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub context: String,
     /// Hard cap on generated fragments/tokens.
     pub max_tokens: usize,
     /// Sampling temperature; `0.0` = deterministic/greedy. Stub providers
@@ -80,6 +83,7 @@ impl GenerationRequest {
     pub fn clear_private(&mut self) {
         use zeroize::Zeroize;
         self.prompt.zeroize();
+        self.context.zeroize();
         for stop in &mut self.stop {
             stop.zeroize();
         }
@@ -98,6 +102,7 @@ impl Default for GenerationRequest {
     fn default() -> Self {
         Self {
             prompt: String::new(),
+            context: String::new(),
             max_tokens: 256,
             temperature: 0.0,
             top_p: None,

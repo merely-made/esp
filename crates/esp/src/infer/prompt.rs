@@ -148,6 +148,7 @@ impl<P: InferenceProvider> SessionProvider<P> {
     ) -> Result<super::PreparedGenerationRequest, InferError> {
         let mut rendered = request.clone();
         rendered.prompt = self.template.render(&request.prompt, context)?;
+        zeroize::Zeroize::zeroize(&mut rendered.context);
         rendered.max_tokens = request.max_tokens.min(self.max_tokens);
         for stop in self.template.stops() {
             if !rendered.stop.contains(&stop) {
@@ -178,7 +179,7 @@ impl<P: InferenceProvider> InferenceProvider for SessionProvider<P> {
         // including the originally chosen seed and stop strings.
         let prepared = match resume {
             Some(checkpoint) => checkpoint.request.clone(),
-            None => self.prepare(request, "")?.request,
+            None => self.prepare(request, &request.context)?.request,
         };
         let mut checkpoint = self.bound.provider().generate_checkpointed(
             &prepared,
@@ -210,7 +211,7 @@ impl<P: InferenceProvider> InferenceProvider for SessionProvider<P> {
         request: &GenerationRequest,
         on_token: &mut dyn FnMut(&str) -> ControlFlow<()>,
     ) -> Result<String, InferError> {
-        let prepared = self.prepare(request, "")?;
+        let prepared = self.prepare(request, &request.context)?;
         self.bound.generate_prepared_streaming(&prepared, on_token)
     }
 }
