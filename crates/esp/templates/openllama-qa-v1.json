@@ -1,0 +1,11 @@
+{
+  "schema": "esp.prompt-template/v1",
+  "bos": "<s>",
+  "eos": "</s>",
+  "system": {"prefix": "", "suffix": ""},
+  "user": {"prefix": "Question: ", "suffix": "\n"},
+  "assistant": {"prefix": "Answer:", "suffix": ""},
+  "system_prompt": "",
+  "context": {"prefix": "Context:\n", "suffix": "\n\n"},
+  "stop": ["</s>"]
+}

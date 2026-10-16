@@ -12,9 +12,9 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 5 {
+    if args.len() != 5 && args.len() != 6 {
         return Err(
-            "usage: import_inference_model LIBRARY_REDB MODEL_DIR TEMPLATE_JSON MODEL_ID LICENSE"
+            "usage: import_inference_model LIBRARY_REDB MODEL_DIR TEMPLATE_JSON MODEL_ID LICENSE [STREAMING_OPTIONS_JSON]"
                 .into(),
         );
     }
@@ -29,29 +29,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_str()
         .ok_or("config needs model_type")?
         .to_string();
-    let weights = std::fs::read(directory.join("model.safetensors"))?;
+    let weights = if args.len() == 5 {
+        Some(std::fs::read(directory.join("model.safetensors"))?)
+    } else {
+        None
+    };
     let tokenizer = std::fs::read(directory.join("tokenizer.json"))?;
     if let Some(parent) = library.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
     let mut store = muniment::RedbBackend::open(&library)?;
     let row = pollster::block_on(async {
-        let model = ModelLibrary::save_model_with_components(
-            &mut store,
-            &args[3],
-            &architecture,
-            &args[4],
-            config,
-            &weights,
-            &tokenizer,
-            vec![],
-            vec![],
-            PrivacyClass::LocalOnly,
-            ProvenanceRecord::self_imported("local"),
-            TrustEnvelope::self_asserted(),
-            Timestamp::ZERO,
-        )
-        .await?;
+        let model = if let Some(weights) = &weights {
+            ModelLibrary::save_model_with_components(
+                &mut store,
+                &args[3],
+                &architecture,
+                &args[4],
+                config,
+                weights,
+                &tokenizer,
+                vec![],
+                vec![],
+                PrivacyClass::LocalOnly,
+                ProvenanceRecord::self_imported("local"),
+                TrustEnvelope::self_asserted(),
+                Timestamp::ZERO,
+            )
+            .await?
+        } else {
+            let options = serde_json::from_slice(&std::fs::read(&args[5])?)?;
+            esp::infer::layer_library::import_layered_model(
+                &mut store, &directory, &args[3], &args[4], options,
+            )
+            .await?
+        };
         let template = save_typed(
             &mut store,
             &template,
@@ -62,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Timestamp::ZERO,
         )
         .await?;
-        save_typed(
+        let row = save_typed(
             &mut store,
             &InferenceModelRow { model, template },
             vec![],
@@ -71,7 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TrustEnvelope::self_asserted(),
             Timestamp::ZERO,
         )
-        .await
+        .await?;
+        Ok::<_, Box<dyn std::error::Error>>(row)
     })?;
     println!(
         "{}",

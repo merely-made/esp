@@ -126,6 +126,19 @@ pub fn generate_ids_with(
     picker: &mut TokenPicker,
     on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
 ) -> Vec<u32> {
+    try_generate_ids_with(model, prompt_ids, max_new, eos, picker, on_token)
+        .expect("resident decoder generation")
+}
+
+/// Fallible generation for a provider whose next layer may fail to read.
+pub fn try_generate_ids_with(
+    model: &DecoderModel,
+    prompt_ids: &[u32],
+    max_new: usize,
+    eos: &[u32],
+    picker: &mut TokenPicker,
+    on_token: &mut dyn FnMut(u32) -> ControlFlow<()>,
+) -> Result<Vec<u32>, crate::infer::InferError> {
     assert!(!prompt_ids.is_empty(), "prompt must not be empty");
     let device = model.device();
     let mut cache = model.new_cache();
@@ -135,25 +148,25 @@ pub fn generate_ids_with(
         burn::tensor::TensorData::new(prompt, [1, prompt_ids.len()]),
         &device,
     );
-    let mut logits = model.forward_cached(input, &mut cache);
+    let mut logits = model.try_forward_cached_last(input, &mut cache)?;
 
     let mut out = Vec::new();
-    for _ in 0..max_new {
+    for position in 0..max_new {
         let token = picker.pick(&logits);
         if eos.contains(&token) {
             break;
         }
         out.push(token);
-        if on_token(token).is_break() {
+        if on_token(token).is_break() || position + 1 == max_new {
             break;
         }
         let step: Tensor<2, Int> = Tensor::from_data(
             burn::tensor::TensorData::new(vec![token as i32], [1, 1]),
             &device,
         );
-        logits = model.forward_cached(step, &mut cache);
+        logits = model.try_forward_cached_last(step, &mut cache)?;
     }
-    out
+    Ok(out)
 }
 
 /// Async-readback counterpart to [`generate_ids_with`]. Model execution is
@@ -214,10 +227,12 @@ pub async fn generate_ids_with_async_controlled(
         burn::tensor::TensorData::new(prompt, [1, prompt_ids.len()]),
         &device,
     );
-    let mut logits = model.forward_cached(input, &mut cache);
+    let mut logits = model
+        .try_forward_cached_last(input, &mut cache)
+        .map_err(|error| error.to_string())?;
 
     let mut out = Vec::new();
-    for _ in 0..max_new {
+    for position in 0..max_new {
         let token = picker.pick_async(&logits).await?;
         if should_cancel() {
             return Ok(AsyncGenerationOutcome {
@@ -229,14 +244,16 @@ pub async fn generate_ids_with_async_controlled(
             break;
         }
         out.push(token);
-        if on_token(token).is_break() {
+        if on_token(token).is_break() || position + 1 == max_new {
             break;
         }
         let step: Tensor<2, Int> = Tensor::from_data(
             burn::tensor::TensorData::new(vec![token as i32], [1, 1]),
             &device,
         );
-        logits = model.forward_cached(step, &mut cache);
+        logits = model
+            .try_forward_cached_last(step, &mut cache)
+            .map_err(|error| error.to_string())?;
     }
     Ok(AsyncGenerationOutcome {
         token_ids: out,

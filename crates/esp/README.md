@@ -42,6 +42,31 @@ to the immutable model session. The local import example, pinned SmolLM2 row,
 independent-reference reproduction and resident qualification are recorded in
 the [resident inference plan](../../../design_docs/mere_docs/implementation_strategy/2026-10-15_resident_inference_and_recall_plan.md).
 
+Native imports can pass a sixth argument to `import_inference_model`, a JSON
+file with `query_chunk`, `max_layer_bytes` and `max_shared_bytes`. For example:
+
+```json
+{"query_chunk":32,"max_layer_bytes":268435456,"max_shared_bytes":1073741824}
+```
+
+That selects `esp.layer-weights/v1`: one shared embedding/norm/head artifact
+and an ordered list of exact layer artifacts. The importer reads bounded
+tensor ranges from a single safetensors file or an HF sharded weight index.
+`infer::layer_library::import_layered_model` exposes the same operation to
+hosts. It neither acquires model bytes over the network nor changes their
+precision. A resolved layered row needs `load_with_layer_source`; the source
+borrows its existing library owner for each verified read. The loader's
+`/layer-stream-v1` suffix and the weight index enter the exact session identity.
+
+The streamed decoder retains one layer's weights at a time, with the shared
+weights and KV cache resident. Native execution drains each query chunk and
+layer before proceeding; generation applies the output head only to the final
+position. `streaming_stats` counts logical artifact bytes and layer reads,
+including OS-cache hits. These counters are not physical disk traffic or a
+process memory measurement. The real-model fixture is
+`tests/layer_streaming_real.rs`; the larger-than-device-memory I6 gate remains
+separate from its small-model reference and long-prefill checks.
+
 Providers expose cooperative cancellation separately from text fragments, so
 a host can cancel a device wait before generation starts. The LoRA trainer
 arms also expose controlled entry points that check cancellation between

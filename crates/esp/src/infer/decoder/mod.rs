@@ -24,6 +24,8 @@
 //! `InferenceProvider` impl are the next slices.
 
 pub mod attention;
+#[cfg(not(target_family = "wasm"))]
+pub mod checkpoint;
 pub mod config;
 pub mod generate;
 #[cfg(feature = "decoder-wgpu")]
@@ -35,6 +37,7 @@ pub mod lora;
 pub mod model;
 pub mod provider;
 pub mod sample;
+pub mod streaming;
 pub mod tensors;
 #[cfg(feature = "decoder-lora")]
 pub mod train;

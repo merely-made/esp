@@ -6,7 +6,9 @@
 
 //! Local-only resolution of an inference row from the owner's model library.
 
+use super::decoder::streaming::LayerSource;
 use super::decoder::{DecoderDevice, DecoderProvider};
+use super::layer_library::{LayerArtifact, LayerWeightIndex};
 use super::prompt::{PromptTemplate, SessionProvider};
 use super::{BoundModelSession, InferError, ModelSession};
 use eidetic::typed::{TypedPayload, load_typed};
@@ -54,6 +56,7 @@ pub struct ResolvedInferenceRow {
     model_ref: ManifestId,
     model: eidetic::models::ResolvedModel,
     template_bytes: Vec<u8>,
+    layered: Option<LayerWeightIndex>,
 }
 
 /// Resolve and validate the row and template without constructing a device.
@@ -76,18 +79,88 @@ pub async fn resolve_library_session(
         .await
         .map_err(failure)?;
     PromptTemplate::from_bytes(&template_bytes)?;
-    let resolved = ModelLibrary::resolve_components(store, &mut NoFetcher, row.model)
+    let model_manifest = ModelLibrary::load_model(store, row.model)
         .await
         .map_err(failure)?
         .ok_or_else(|| failure(format!("model {} is missing", row.model)))?;
+    let weight_manifest = eidetic::manifest::load_manifest(store, model_manifest.weight_blob)
+        .await
+        .map_err(failure)?
+        .ok_or_else(|| failure("weight manifest missing"))?;
+    let layered = if weight_manifest.schema == LayerWeightIndex::schema_ref() {
+        if weight_manifest.id != model_manifest.weight_blob
+            || weight_manifest.content_hash != model_manifest.weight_blob.0
+        {
+            return Err(failure(
+                "layer index manifest does not match its content reference",
+            ));
+        }
+        let index =
+            load_typed::<LayerWeightIndex>(store, &mut NoFetcher, model_manifest.weight_blob)
+                .await
+                .map_err(failure)?
+                .ok_or_else(|| failure("layer index missing"))?;
+        index.options.validate()?;
+        let config = super::decoder::DecoderConfig::from_json_bytes(
+            &serde_json::to_vec(&model_manifest.config).map_err(failure)?,
+        )?;
+        if index.layers.len() != config.num_hidden_layers {
+            return Err(failure("layer index count disagrees with model config"));
+        }
+        Some(index)
+    } else {
+        None
+    };
+    let resolved = if let Some(index) = &layered {
+        let tokenizer_manifest =
+            eidetic::manifest::load_manifest(store, model_manifest.tokenizer_blob)
+                .await
+                .map_err(failure)?
+                .ok_or_else(|| failure("tokenizer missing"))?;
+        eidetic::models::ResolvedModel {
+            components: eidetic::ModelComponents {
+                config_bytes: serde_json::to_vec(&model_manifest.config).map_err(failure)?,
+                tokenizer_bytes: eidetic::manifest::resolve_blob(
+                    store,
+                    &mut NoFetcher,
+                    &tokenizer_manifest,
+                )
+                .await
+                .map_err(failure)?,
+                weight_bytes: index
+                    .shared
+                    .read(store, index.options.max_shared_bytes)
+                    .await?,
+            },
+            manifest: model_manifest,
+        }
+    } else {
+        ModelLibrary::resolve_components(store, &mut NoFetcher, row.model)
+            .await
+            .map_err(failure)?
+            .ok_or_else(|| failure("model missing"))?
+    };
     Ok(ResolvedInferenceRow {
         model_ref: row.model,
         model: resolved,
         template_bytes,
+        layered,
     })
 }
 
 impl ResolvedInferenceRow {
+    /// A host retains the model-library owner while this source is in use.
+    pub fn layer_artifacts(&self) -> Option<Vec<LayerArtifact>> {
+        self.layered.as_ref().map(|index| index.layers.clone())
+    }
+
+    fn execution_loader(&self, loader: &str) -> String {
+        if self.layered.is_some() {
+            format!("{loader}/layer-stream-v1")
+        } else {
+            loader.into()
+        }
+    }
     /// Exact identity before a deferred device load. The decoder currently
     /// accepts only unquantized model weights.
     pub fn session(&self, loader: &str) -> ModelSession {
@@ -97,7 +170,7 @@ impl ResolvedInferenceRow {
             tokenizer_ref: self.model.manifest.tokenizer_blob,
             prompt_template_hash: eidetic::Hash::of(&self.template_bytes),
             quantization: None,
-            loader: loader.into(),
+            loader: self.execution_loader(loader),
             adapters: Vec::new(),
         }
     }
@@ -111,7 +184,7 @@ impl ResolvedInferenceRow {
             model_id: self.model.manifest.model_id.clone(),
             context_window: config.max_position_embeddings,
             quantization: None,
-            loader: loader.into(),
+            loader: self.execution_loader(loader),
             streaming: true,
         })
     }
@@ -123,14 +196,38 @@ impl ResolvedInferenceRow {
         loader: &str,
         max_tokens: usize,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
-        let provider = DecoderProvider::from_bytes(
-            &self.model.components.config_bytes,
-            &self.model.components.tokenizer_bytes,
-            &self.model.components.weight_bytes,
-            &self.model.manifest.model_id,
-            loader,
-            device,
-        )?
+        self.load_with_layer_source(device, loader, max_tokens, None)
+    }
+
+    pub fn load_with_layer_source(
+        &self,
+        device: &DecoderDevice,
+        loader: &str,
+        max_tokens: usize,
+        source: Option<Box<dyn LayerSource>>,
+    ) -> Result<SessionProvider<DecoderProvider>, InferError> {
+        let provider = if let Some(index) = &self.layered {
+            DecoderProvider::from_layer_source(
+                &self.model.components.config_bytes,
+                &self.model.components.tokenizer_bytes,
+                &self.model.components.weight_bytes,
+                source
+                    .ok_or_else(|| failure("streamed model requires its library layer source"))?,
+                index.options.clone(),
+                &self.model.manifest.model_id,
+                self.execution_loader(loader),
+                device,
+            )?
+        } else {
+            DecoderProvider::from_bytes(
+                &self.model.components.config_bytes,
+                &self.model.components.tokenizer_bytes,
+                &self.model.components.weight_bytes,
+                &self.model.manifest.model_id,
+                loader,
+                device,
+            )?
+        }
         .with_literal_prompt();
         let session = self.session(loader);
         SessionProvider::new(
