@@ -45,6 +45,208 @@ pub(crate) const LAYER_TENSORS: [&str; 9] = [
     "mlp.down_proj.weight",
 ];
 
+pub(crate) fn layer_tensor_names(config: &DecoderConfig) -> Vec<&'static str> {
+    let mut names = LAYER_TENSORS.to_vec();
+    if config.qkv_bias() {
+        names.extend([
+            "self_attn.q_proj.bias",
+            "self_attn.k_proj.bias",
+            "self_attn.v_proj.bias",
+        ]);
+    }
+    if config.output_bias() {
+        names.push("self_attn.o_proj.bias");
+    }
+    if config.qk_norm() {
+        names.extend(["self_attn.q_norm.weight", "self_attn.k_norm.weight"]);
+    }
+    names
+}
+
+pub(crate) fn layer_core_tensor_names(config: &DecoderConfig, index: usize) -> Vec<String> {
+    let mut names: Vec<_> = layer_tensor_names(config)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if config.layer_is_moe(index) {
+        names.retain(|name| !name.starts_with("mlp."));
+        names.extend(
+            [
+                "mlp.gate.weight",
+                "mlp.shared_expert_gate.weight",
+                "mlp.shared_expert.gate_proj.weight",
+                "mlp.shared_expert.up_proj.weight",
+                "mlp.shared_expert.down_proj.weight",
+            ]
+            .map(str::to_string),
+        );
+    }
+    names
+}
+
+pub(crate) fn expert_tensor_names(layer: usize, expert: usize) -> Vec<String> {
+    ["gate_proj", "up_proj", "down_proj"]
+        .map(|name| format!("model.layers.{layer}.mlp.experts.{expert}.{name}.weight"))
+        .into()
+}
+
+pub(crate) fn layer_all_tensor_names(config: &DecoderConfig, index: usize) -> Vec<String> {
+    let mut names = layer_core_tensor_names(config, index);
+    if config.layer_is_moe(index) {
+        for expert in 0..config.moe.as_ref().unwrap().num_experts {
+            names.extend(expert_tensor_names(index, expert).into_iter().map(|name| {
+                name.strip_prefix(&format!("model.layers.{index}."))
+                    .unwrap()
+                    .to_string()
+            }));
+        }
+    }
+    names
+}
+
+pub(crate) enum ExpertMode<'a> {
+    InTensors,
+    Resident(&'a dyn super::streaming::LayerSource, usize),
+    Streamed(super::moe::ExpertStreaming),
+}
+
+fn mlp_weights(
+    tensors: &SafeTensors<'_>,
+    prefix: &str,
+    h: usize,
+    inter: usize,
+    device: &Device,
+    format: super::WeightFormat,
+) -> Result<super::moe::MlpWeights, InferError> {
+    let read = |name: &str, shape| {
+        super::weight_format::extract(
+            &view(tensors, &format!("{prefix}.{name}.weight"))?,
+            shape,
+            device,
+            format,
+            true,
+        )
+    };
+    Ok(super::moe::MlpWeights {
+        gate_w: read("gate_proj", [inter, h])?,
+        up_w: read("up_proj", [inter, h])?,
+        down_w: read("down_proj", [h, inter])?,
+    })
+}
+
+pub(crate) fn load_expert(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    layer: usize,
+    expert: usize,
+    device: &Device,
+    format: super::WeightFormat,
+) -> Result<super::moe::MlpWeights, InferError> {
+    let moe = config
+        .moe
+        .as_ref()
+        .ok_or_else(|| InferError::InvalidConfig("expert read for a dense model".into()))?;
+    if !config.layer_is_moe(layer)
+        || expert >= moe.num_experts
+        || tensors.names().into_iter().cloned().collect::<HashSet<_>>()
+            != expert_tensor_names(layer, expert)
+                .into_iter()
+                .collect::<HashSet<_>>()
+    {
+        return Err(InferError::InvalidWeights(
+            "expert artifact names disagree with layer/expert selection".into(),
+        ));
+    }
+    mlp_weights(
+        tensors,
+        &format!("model.layers.{layer}.mlp.experts.{expert}"),
+        config.hidden_size,
+        moe.moe_intermediate_size,
+        device,
+        format,
+    )
+}
+
+fn load_mlp(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    i: usize,
+    device: &Device,
+    format: super::WeightFormat,
+    mode: ExpertMode<'_>,
+) -> Result<super::moe::LoadedMlp, InferError> {
+    use super::moe::{LoadedExperts, LoadedMlp};
+    let prefix = format!("model.layers.{i}.mlp");
+    let h = config.hidden_size;
+    if !config.layer_is_moe(i) {
+        return Ok(LoadedMlp::Dense(mlp_weights(
+            tensors,
+            &prefix,
+            h,
+            config.intermediate_size,
+            device,
+            format,
+        )?));
+    }
+    if format != super::WeightFormat::F32 {
+        return Err(InferError::Unsupported { feature:"MoE weight format".into(),detail:"routed expert formats require separate qualification; only f32 execution is admitted".into() });
+    }
+    let moe = config.moe.as_ref().unwrap();
+    let experts = match mode {
+        ExpertMode::Streamed(source) => LoadedExperts::Streamed(source),
+        mode => {
+            let mut experts = Vec::with_capacity(moe.num_experts);
+            for expert in 0..moe.num_experts {
+                experts.push(match mode {
+                    ExpertMode::Resident(source, limit) => {
+                        let bytes = source.read_expert(i, expert, limit)?;
+                        if bytes.len() > limit {
+                            return Err(InferError::InvalidWeights(
+                                "resident expert source exceeded its budget".into(),
+                            ));
+                        }
+                        let tensors = SafeTensors::deserialize(&bytes)
+                            .map_err(|e| InferError::InvalidWeights(e.to_string()))?;
+                        load_expert(config, &tensors, i, expert, device, format)?
+                    },
+                    ExpertMode::InTensors => mlp_weights(
+                        tensors,
+                        &format!("{prefix}.experts.{expert}"),
+                        h,
+                        moe.moe_intermediate_size,
+                        device,
+                        format,
+                    )?,
+                    ExpertMode::Streamed(_) => unreachable!(),
+                });
+            }
+            LoadedExperts::Resident(experts)
+        },
+    };
+    let matrix = |name: &str, rows| {
+        super::weight_format::extract(
+            &view(tensors, &format!("{prefix}.{name}.weight"))?,
+            [rows, h],
+            device,
+            format,
+            true,
+        )
+    };
+    Ok(LoadedMlp::Moe {
+        router: matrix("gate", moe.num_experts)?,
+        shared: mlp_weights(
+            tensors,
+            &format!("{prefix}.shared_expert"),
+            h,
+            moe.shared_expert_intermediate_size,
+            device,
+            format,
+        )?,
+        shared_gate: matrix("shared_expert_gate", 1)?,
+        experts,
+    })
+}
+
 /// Older checkpoints store RoPE's inverse frequencies as a buffer. They are
 /// derived from `rope_theta`, which the config already supplies, and a
 /// scaled variant is refused at the config.
@@ -54,14 +256,14 @@ fn ignorable(name: &str) -> bool {
 
 fn why_unconsumed(name: &str) -> &'static str {
     if name.ends_with(".bias") {
-        "bias terms are not implemented"
+        "this bias is not declared by the decoder configuration"
     } else if name.contains("q_norm") || name.contains("k_norm") {
-        "per-head QK-norm is not implemented"
+        "this head norm is not declared by the decoder configuration"
     } else if name.contains("experts")
         || name.contains("block_sparse_moe")
         || name.ends_with(".mlp.gate.weight")
     {
-        "mixture-of-experts layers are not implemented"
+        "this expert or router is not declared by the decoder configuration"
     } else if name.contains("norm") {
         "normalization layers beyond the Llama block's two per layer are not implemented"
     } else {
@@ -82,7 +284,7 @@ fn refuse_unconsumed(config: &DecoderConfig, tensors: &SafeTensors<'_>) -> Resul
     .map(str::to_string)
     .collect();
     for i in 0..config.num_hidden_layers {
-        for suffix in LAYER_TENSORS {
+        for suffix in layer_all_tensor_names(config, i) {
             consumed.insert(format!("model.layers.{i}.{suffix}"));
         }
     }
@@ -140,6 +342,84 @@ pub(crate) fn load_decoder_shared_tensors(
         device,
         super::weight_format::WeightFormat::F32,
     )
+}
+
+pub(crate) fn load_shared_shards(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    device: &Device,
+    max_matrix_bytes: usize,
+) -> Result<super::model::LoadedSharedShards, InferError> {
+    if tensors.names().iter().any(|name| {
+        !matches!(
+            name.as_str(),
+            "model.embed_tokens.weight" | "model.norm.weight" | "lm_head.weight"
+        )
+    }) {
+        return Err(InferError::InvalidWeights(
+            "unexpected tensor in shared-row artifact".into(),
+        ));
+    }
+    let h = config.hidden_size;
+    let row_bytes = h
+        .checked_mul(4)
+        .ok_or_else(|| InferError::InvalidWeights("shared row byte overflow".into()))?;
+    let rows = max_matrix_bytes / row_bytes;
+    if rows == 0 {
+        return Err(InferError::InvalidWeights(
+            "shared tensor bound cannot hold one f32 row".into(),
+        ));
+    }
+    let read = |name: &str, transpose: bool| -> Result<Vec<burn::tensor::Tensor<2>>, InferError> {
+        let tensor = view(tensors, name)?;
+        if tensor.shape() != [config.vocab_size, h] {
+            return Err(InferError::InvalidWeights(format!(
+                "shared matrix shape {name}"
+            )));
+        }
+        let encoded_row = h
+            .checked_mul(tensor.dtype().size())
+            .ok_or_else(|| InferError::InvalidWeights("encoded row byte overflow".into()))?;
+        (0..config.vocab_size)
+            .step_by(rows)
+            .map(|first| {
+                let end = first.saturating_add(rows).min(config.vocab_size);
+                let part = TensorView::new(
+                    tensor.dtype(),
+                    vec![end - first, h],
+                    &tensor.data()[first * encoded_row..end * encoded_row],
+                )
+                .map_err(|e| InferError::InvalidWeights(e.to_string()))?;
+                super::weight_format::extract(
+                    &part,
+                    [end - first, h],
+                    device,
+                    super::WeightFormat::F32,
+                    transpose,
+                )
+            })
+            .collect()
+    };
+    let head = match tensors.tensor("lm_head.weight") {
+        Ok(_) => Some(read("lm_head.weight", true)?),
+        Err(_) if config.tie_word_embeddings => None,
+        Err(_) => {
+            return Err(InferError::InvalidWeights(
+                "untied output head missing".into(),
+            ));
+        },
+    };
+    Ok(super::model::LoadedSharedShards {
+        embed: read("model.embed_tokens.weight", false)?,
+        norm: super::weight_format::extract(
+            &view(tensors, "model.norm.weight")?,
+            [h],
+            device,
+            super::WeightFormat::F32,
+            false,
+        )?,
+        head,
+    })
 }
 
 pub(crate) fn load_decoder_shared_tensors_with_format(
@@ -204,6 +484,17 @@ pub(crate) fn load_decoder_layer_with_format(
     device: &Device,
     format: super::weight_format::WeightFormat,
 ) -> Result<LoadedDecoderLayer, InferError> {
+    load_decoder_layer_with_mode(config, tensors, i, device, format, ExpertMode::InTensors)
+}
+
+pub(crate) fn load_decoder_layer_with_mode(
+    config: &DecoderConfig,
+    tensors: &SafeTensors<'_>,
+    i: usize,
+    device: &Device,
+    format: super::WeightFormat,
+    mode: ExpertMode<'_>,
+) -> Result<LoadedDecoderLayer, InferError> {
     let extract_1d = |v: &TensorView<'_>, len, device: &Device| {
         super::weight_format::extract(v, [len], device, format, false)
     };
@@ -212,9 +503,34 @@ pub(crate) fn load_decoder_layer_with_format(
     };
     let h = config.hidden_size;
     let kv = config.kv_heads() * config.head_dim();
-    let inter = config.intermediate_size;
     let p = format!("model.layers.{i}");
+    let optional = |required: bool, suffix: &str, len: usize| {
+        required
+            .then(|| extract_1d(&view(tensors, &format!("{p}.{suffix}"))?, len, device))
+            .transpose()
+    };
     Ok(LoadedDecoderLayer {
+        attention: super::attention::LoadedAttentionOptions {
+            q_bias: optional(
+                config.qkv_bias(),
+                "self_attn.q_proj.bias",
+                config.query_width(),
+            )?,
+            k_bias: optional(config.qkv_bias(), "self_attn.k_proj.bias", kv)?,
+            v_bias: optional(config.qkv_bias(), "self_attn.v_proj.bias", kv)?,
+            o_bias: optional(config.output_bias(), "self_attn.o_proj.bias", h)?,
+            q_norm: optional(
+                config.qk_norm(),
+                "self_attn.q_norm.weight",
+                config.head_dim(),
+            )?,
+            k_norm: optional(
+                config.qk_norm(),
+                "self_attn.k_norm.weight",
+                config.head_dim(),
+            )?,
+            layer_index: i,
+        },
         input_norm_gamma: extract_1d(
             &view(&tensors, &format!("{p}.input_layernorm.weight"))?,
             h,
@@ -222,7 +538,7 @@ pub(crate) fn load_decoder_layer_with_format(
         )?,
         q_w: extract_2d_transposed(
             &view(&tensors, &format!("{p}.self_attn.q_proj.weight"))?,
-            h,
+            config.query_width(),
             h,
             device,
         )?,
@@ -241,7 +557,7 @@ pub(crate) fn load_decoder_layer_with_format(
         o_w: extract_2d_transposed(
             &view(&tensors, &format!("{p}.self_attn.o_proj.weight"))?,
             h,
-            h,
+            config.query_width(),
             device,
         )?,
         post_norm_gamma: extract_1d(
@@ -249,24 +565,7 @@ pub(crate) fn load_decoder_layer_with_format(
             h,
             device,
         )?,
-        gate_w: extract_2d_transposed(
-            &view(&tensors, &format!("{p}.mlp.gate_proj.weight"))?,
-            inter,
-            h,
-            device,
-        )?,
-        up_w: extract_2d_transposed(
-            &view(&tensors, &format!("{p}.mlp.up_proj.weight"))?,
-            inter,
-            h,
-            device,
-        )?,
-        down_w: extract_2d_transposed(
-            &view(&tensors, &format!("{p}.mlp.down_proj.weight"))?,
-            h,
-            inter,
-            device,
-        )?,
+        mlp: load_mlp(config, tensors, i, device, format, mode)?,
     })
 }
 
@@ -526,12 +825,14 @@ pub(crate) mod tests {
     }
 }
 
-/// A streamed layer artifact must contain exactly this layer's nine tensors.
+/// A core artifact contains exactly this layer's declared tensors. Routed
+/// experts live in separate artifacts and cannot be smuggled into the core.
 pub(crate) fn validate_layer_names(
+    config: &DecoderConfig,
     tensors: &SafeTensors<'_>,
     index: usize,
 ) -> Result<(), InferError> {
-    let expected: HashSet<String> = LAYER_TENSORS
+    let expected: HashSet<String> = layer_core_tensor_names(config, index)
         .iter()
         .map(|suffix| format!("model.layers.{index}.{suffix}"))
         .collect();

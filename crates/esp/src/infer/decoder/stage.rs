@@ -65,20 +65,51 @@ pub fn layer_resident_bytes(
     let h = config.hidden_size as u128;
     let kv = config.kv_heads() as u128 * config.head_dim() as u128;
     let inter = config.intermediate_size as u128;
+    let mlp = if let Some(moe) = &config.moe {
+        if format != WeightFormat::F32 {
+            return Err(InferError::Unsupported {
+                feature: "MoE stage format".into(),
+                detail: "only f32 expert execution is qualified".into(),
+            });
+        }
+        // Conservative for hybrid models: reserve a complete expert bank in
+        // each layer. An admitted resident stage must hold every routed expert.
+        h.saturating_mul(3)
+            .saturating_mul(
+                (moe.num_experts as u128)
+                    .saturating_mul(moe.moe_intermediate_size as u128)
+                    .saturating_add(moe.shared_expert_intermediate_size as u128),
+            )
+            .saturating_add(h.saturating_mul(moe.num_experts as u128 + 1))
+    } else {
+        h.saturating_mul(inter).saturating_mul(3)
+    };
     let projections = h
-        .saturating_mul(h)
+        .saturating_mul(config.query_width() as u128)
         .saturating_mul(2)
         .saturating_add(h.saturating_mul(kv).saturating_mul(2))
-        .saturating_add(h.saturating_mul(inter).saturating_mul(3));
+        .saturating_add(mlp);
     let scalar = if format == WeightFormat::F32 { 4 } else { 2 };
+    let extra = (if config.qkv_bias() {
+        config.query_width() as u128 + 2 * kv
+    } else {
+        0
+    }) + (if config.output_bias() { h } else { 0 })
+        + (if config.qk_norm() {
+            2 * config.head_dim() as u128
+        } else {
+            0
+        });
     let weights = match format {
         WeightFormat::Q8Block32 => projections
             .saturating_add(projections / 32 * 4)
-            .saturating_add(2 * h * scalar),
+            .saturating_add((2 * h + extra) * scalar),
         WeightFormat::Q4Block32 => (projections / 2)
             .saturating_add(projections / 32 * 4)
-            .saturating_add(2 * h * scalar),
-        _ => projections.saturating_add(2 * h).saturating_mul(scalar),
+            .saturating_add((2 * h + extra) * scalar),
+        _ => projections
+            .saturating_add(2 * h + extra)
+            .saturating_mul(scalar),
     };
     u64::try_from(
         weights.saturating_add(
@@ -249,7 +280,7 @@ pub struct DecoderStage {
     options: StreamingOptions,
     device: Device,
     cache: Mutex<Cache>,
-    output: Option<(burn::nn::RmsNorm, burn::nn::Linear)>,
+    output: Option<(burn::nn::RmsNorm, super::model::OutputHead)>,
 }
 
 impl std::fmt::Debug for DecoderStage {
@@ -288,9 +319,14 @@ impl DecoderStage {
             }
             let tensors = safetensors::SafeTensors::deserialize(&bytes)
                 .map_err(|e| InferError::InvalidWeights(e.to_string()))?;
-            super::loader::validate_layer_names(&tensors, index)?;
-            let loaded = super::loader::load_decoder_layer_with_format(
-                &config, &tensors, index, device, format,
+            super::loader::validate_layer_names(&config, &tensors, index)?;
+            let loaded = super::loader::load_decoder_layer_with_mode(
+                &config,
+                &tensors,
+                index,
+                device,
+                format,
+                super::loader::ExpertMode::Resident(source, options.max_layer_bytes),
             )?;
             layers.push(DecoderLayer::from_loaded(&config, loaded, device));
         }
@@ -311,12 +347,7 @@ impl DecoderStage {
                 "stage layer count disagrees with range".into(),
             ));
         }
-        let rope = LlamaRotaryEncoding::new(
-            config.max_position_embeddings,
-            config.head_dim(),
-            config.rope_theta,
-            device,
-        );
+        let rope = LlamaRotaryEncoding::for_config(&config, device);
         Ok(Self {
             cache: Mutex::new(Cache {
                 layers: (0..layers.len()).map(|_| LayerKvCache::default()).collect(),
@@ -361,7 +392,45 @@ impl DecoderStage {
                 self.config.rms_norm_eps,
                 &self.device,
             ),
-            super::attention::linear_no_bias_from_loaded(head, &self.device),
+            super::model::OutputHead(vec![super::attention::linear_no_bias_from_loaded(
+                head,
+                &self.device,
+            )]),
+        ));
+        Ok(self)
+    }
+
+    pub(crate) fn with_output_shards(
+        mut self,
+        shared: super::model::LoadedSharedShards,
+    ) -> Result<Self, InferError> {
+        if self.format != WeightFormat::F32 {
+            return Err(InferError::Unsupported {
+                feature: "shared-row stage format".into(),
+                detail: "shared-row shards are qualified for f32 execution".into(),
+            });
+        }
+        if self.range.end != self.config.num_hidden_layers {
+            return Err(InferError::InvalidWeights(
+                "only the final stage may own the output head".into(),
+            ));
+        }
+        let head = shared.head.unwrap_or_else(|| {
+            shared
+                .embed
+                .into_iter()
+                .map(|weight| weight.transpose())
+                .collect()
+        });
+        self.output = Some((
+            super::layer::rms_norm_from_loaded(shared.norm, self.config.rms_norm_eps, &self.device),
+            super::model::OutputHead(
+                head.into_iter()
+                    .map(|weight| {
+                        super::attention::linear_no_bias_from_loaded(weight, &self.device)
+                    })
+                    .collect(),
+            ),
         ));
         Ok(self)
     }

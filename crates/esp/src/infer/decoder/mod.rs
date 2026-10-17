@@ -23,6 +23,8 @@
 //! loader (this module). The KV-cached generation loop and the
 //! `InferenceProvider` impl are the next slices.
 
+#[cfg(test)]
+mod architecture_tests;
 pub mod attention;
 #[cfg(not(target_family = "wasm"))]
 pub mod checkpoint;
@@ -35,6 +37,7 @@ pub mod loader;
 #[cfg(feature = "decoder-lora")]
 pub mod lora;
 pub mod model;
+pub mod moe;
 pub mod provider;
 pub mod sample;
 pub mod stage;
@@ -136,6 +139,15 @@ pub(crate) mod test_support {
     /// Tiny dims for fast tests: hidden 8, 4 heads (head_dim 2), GQA 2.
     pub fn tiny_config() -> DecoderConfig {
         DecoderConfig {
+            moe: None,
+            model_type: None,
+            head_dim: None,
+            attention_bias: false,
+            sliding_window: None,
+            use_sliding_window: None,
+            max_window_layers: None,
+            layer_types: None,
+            rope_scaling: None,
             vocab_size: 32,
             hidden_size: 8,
             intermediate_size: 16,

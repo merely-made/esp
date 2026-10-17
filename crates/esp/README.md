@@ -69,6 +69,30 @@ process memory measurement. The real-model fixture is
 tokens, plus a 4,126-token SmolLM2 prefill. The plan records memory, timing,
 logical I/O and the measurement boundaries.
 
+The decoder also admits the declared Mistral, Qwen2 and Qwen3 dense blocks:
+independent head widths, full or per-layer sliding attention, q/k/v biases,
+Qwen3 per-head QK norms, and static linear/Llama3 RoPE scaling. Templates for
+Qwen2 instruct and Qwen3 nonthinking turns are literal data. A template's exact
+end-of-turn token augments config EOS IDs before token commitment. Other RoPE
+variants, activations, norms and architecture families still fail by name.
+`tests/reference_architectures.py` generates independent Transformers fixtures;
+the native real-row checks are in `tests/architecture_rows.rs`.
+
+Qwen2 MoE imports use a separate `esp.expert-weights/v1` index. It binds core
+layers and each routed expert independently. A host calls
+`ResolvedInferenceRow::artifact_source` with its existing library-owner reader;
+the decoder never acquires network access. Equal routing scores prefer lower
+expert IDs. Only selected experts materialize,
+one at a time, with synchronization before release. `query_chunk` also bounds
+MoE prefill work. Shared embeddings and heads use exact f32 row shards bounded
+by `max_layer_bytes`, so a large vocabulary matrix need not be one device
+buffer. `max_shared_bytes` bounds the complete encoded shared artifact.
+The exact index/options and `/expert-stream-v1/f32` loader bind the session.
+Expert read counters are logical artifact reads, including cache hits.
+Expert formats other than f32 and MoE adapters/training remain refused pending
+their own qualification. `tests/architecture_moe_real.rs` is the explicit
+large-model gate; adding primitives alone does not close the plan's I9 phase.
+
 Explicit weight formats use `esp.layer-weights/v2`. Add a seventh import
 argument, `f16`, `bf16`, `q8-block32` or `q4-block32`, after the streaming
 options file. The result is a candidate row. `import_formatted_model` performs

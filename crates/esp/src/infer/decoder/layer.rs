@@ -15,7 +15,7 @@
 //! `mlp.gate_proj` → SwiGlu inner (the silu side), `mlp.up_proj` → SwiGlu
 //! outer, `mlp.down_proj` → `down`.
 
-use burn::nn::{Linear, RmsNorm, SwiGlu};
+use burn::nn::{RmsNorm, SwiGlu};
 use burn::tensor::{Device, Tensor};
 
 use super::attention::{
@@ -48,22 +48,21 @@ pub struct DecoderLayer {
     input_norm: RmsNorm,
     attention: DecoderAttention,
     post_norm: RmsNorm,
-    mlp: SwiGlu,
-    down: Linear,
+    mlp: super::moe::DecoderMlp,
+    config: DecoderConfig,
 }
 
 /// The pre-loaded tensors for one layer, in Burn `[in, out]` convention.
 #[derive(Clone)]
 pub struct LoadedDecoderLayer {
+    pub attention: super::attention::LoadedAttentionOptions,
     pub input_norm_gamma: Tensor<1>,
     pub q_w: Tensor<2>,
     pub k_w: Tensor<2>,
     pub v_w: Tensor<2>,
     pub o_w: Tensor<2>,
     pub post_norm_gamma: Tensor<1>,
-    pub gate_w: Tensor<2>,
-    pub up_w: Tensor<2>,
-    pub down_w: Tensor<2>,
+    pub mlp: super::moe::LoadedMlp,
 }
 
 impl DecoderLayer {
@@ -74,12 +73,18 @@ impl DecoderLayer {
     ) -> Self {
         Self {
             input_norm: rms_norm_from_loaded(loaded.input_norm_gamma, config.rms_norm_eps, device),
-            attention: DecoderAttention::from_loaded(
-                config, loaded.q_w, loaded.k_w, loaded.v_w, loaded.o_w, device,
+            attention: DecoderAttention::from_loaded_with_options(
+                config,
+                loaded.q_w,
+                loaded.k_w,
+                loaded.v_w,
+                loaded.o_w,
+                loaded.attention,
+                device,
             ),
             post_norm: rms_norm_from_loaded(loaded.post_norm_gamma, config.rms_norm_eps, device),
-            mlp: swiglu_from_loaded(loaded.gate_w, loaded.up_w, device),
-            down: linear_no_bias_from_loaded(loaded.down_w, device),
+            mlp: super::moe::DecoderMlp::new(loaded.mlp, config, device),
+            config: config.clone(),
         }
     }
 
@@ -123,10 +128,28 @@ impl DecoderLayer {
                 start,
                 query_chunk,
             )?;
-        let mlp = self
-            .down
-            .forward(self.mlp.forward(self.post_norm.forward(h.clone())));
-        Ok(h + mlp)
+        let [batch, sequence, width] = h.dims();
+        if matches!(&self.mlp, super::moe::DecoderMlp::Moe { .. }) && query_chunk < sequence {
+            let mut chunks = Vec::new();
+            for first in (0..sequence).step_by(query_chunk) {
+                let end = first.saturating_add(query_chunk).min(sequence);
+                let residual = h.clone().slice([0..batch, first..end, 0..width]);
+                let out = residual.clone()
+                    + self
+                        .mlp
+                        .forward(self.post_norm.forward(residual), &self.config)?;
+                out.device().sync().map_err(|e| {
+                    crate::infer::InferError::Backend(format!("drain expert query chunk: {e}"))
+                })?;
+                chunks.push(out);
+            }
+            Ok(Tensor::cat(chunks, 1))
+        } else {
+            let mlp = self
+                .mlp
+                .forward(self.post_norm.forward(h.clone()), &self.config)?;
+            Ok(h + mlp)
+        }
     }
 }
 
@@ -144,15 +167,20 @@ mod tests {
         DecoderLayer::from_loaded(
             config,
             LoadedDecoderLayer {
+                attention: Default::default(),
                 input_norm_gamma: t1_ones(h, device),
                 q_w: t2(h, h, salt + 1, device),
                 k_w: t2(h, kv, salt + 2, device),
                 v_w: t2(h, kv, salt + 3, device),
                 o_w: t2(h, h, salt + 4, device),
                 post_norm_gamma: t1_ones(h, device),
-                gate_w: t2(h, inter, salt + 5, device),
-                up_w: t2(h, inter, salt + 6, device),
-                down_w: t2(inter, h, salt + 7, device),
+                mlp: crate::infer::decoder::moe::LoadedMlp::Dense(
+                    crate::infer::decoder::moe::MlpWeights {
+                        gate_w: t2(h, inter, salt + 5, device),
+                        up_w: t2(h, inter, salt + 6, device),
+                        down_w: t2(inter, h, salt + 7, device),
+                    },
+                ),
             },
             device,
         )
@@ -205,15 +233,20 @@ mod tests_wgpu {
         let layer = DecoderLayer::from_loaded(
             config,
             LoadedDecoderLayer {
+                attention: Default::default(),
                 input_norm_gamma: Tensor::ones([h], &dev),
                 q_w: t2(h, h, 41),
                 k_w: t2(h, kv, 42),
                 v_w: t2(h, kv, 43),
                 o_w: t2(h, h, 44),
                 post_norm_gamma: Tensor::ones([h], &dev),
-                gate_w: t2(h, inter, 45),
-                up_w: t2(h, inter, 46),
-                down_w: t2(inter, h, 47),
+                mlp: crate::infer::decoder::moe::LoadedMlp::Dense(
+                    crate::infer::decoder::moe::MlpWeights {
+                        gate_w: t2(h, inter, 45),
+                        up_w: t2(h, inter, 46),
+                        down_w: t2(inter, h, 47),
+                    },
+                ),
             },
             &dev,
         );

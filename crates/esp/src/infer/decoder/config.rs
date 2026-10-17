@@ -11,14 +11,10 @@
 //! with `model.safetensors` + `tokenizer.json`, the same artifact triple
 //! `embed`'s BERT uses.
 //!
-//! The decoder implements one block: pre-norm RMSNorm, bias-free
-//! grouped-query attention, split-half RoPE over the full head with
-//! `rope_theta` only, and a SiLU-gated MLP. A config that names another
-//! family, or asks for a feature outside that block, is refused by name
-//! ([`InferError::Unsupported`]) instead of loading and computing
-//! something other than what the checkpoint was trained for. Reference
-//! receipts exist for TinyLlama and SmolLM2; Llama 3.1 and later are
-//! refused until `rope_scaling` is implemented.
+//! Supported blocks use pre-norm RMSNorm, grouped-query attention, split-half
+//! RoPE and SwiGLU. Declared variants add linear/Llama3 scaling, independent
+//! head width, sliding windows, biases, QK norms and Qwen2 routed/shared
+//! experts. Unknown families, scaling modes and unread tensors remain errors.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -26,10 +22,163 @@ use serde_json::Value;
 use crate::infer::provider::InferError;
 
 /// `model_type` values this decoder runs.
-const SUPPORTED_MODEL_TYPES: &[&str] = &["llama"];
+const SUPPORTED_MODEL_TYPES: &[&str] = &["llama", "mistral", "qwen2", "qwen3", "qwen2_moe"];
 
 /// `architectures` entries this decoder runs.
-const SUPPORTED_ARCHITECTURES: &[&str] = &["LlamaForCausalLM"];
+const SUPPORTED_ARCHITECTURES: &[&str] = &[
+    "LlamaForCausalLM",
+    "MistralForCausalLM",
+    "Qwen2ForCausalLM",
+    "Qwen3ForCausalLM",
+    "Qwen2MoeForCausalLM",
+];
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MoeConfig {
+    pub num_experts: usize,
+    pub num_experts_per_tok: usize,
+    pub moe_intermediate_size: usize,
+    pub shared_expert_intermediate_size: usize,
+    #[serde(default)]
+    pub norm_topk_prob: bool,
+    #[serde(default = "one")]
+    pub decoder_sparse_step: usize,
+    #[serde(default)]
+    pub mlp_only_layers: Vec<usize>,
+}
+fn one() -> usize {
+    1
+}
+
+/// Supported static frequency transforms. Dynamic and YaRN variants remain
+/// refused rather than using a checkpoint with the wrong positional encoding.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RopeScaling {
+    Linear {
+        factor: f32,
+    },
+    Llama3 {
+        factor: f32,
+        low_freq_factor: f32,
+        high_freq_factor: f32,
+        original_max_position_embeddings: usize,
+    },
+}
+
+impl RopeScaling {
+    fn parse(value: &Value) -> Result<Self, InferError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| unsupported("rope_scaling", "expected an object"))?;
+        let kind = object
+            .get("rope_type")
+            .or_else(|| object.get("type"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| unsupported("rope_scaling", "missing rope_type"))?;
+        if object
+            .get("type")
+            .zip(object.get("rope_type"))
+            .is_some_and(|(a, b)| a != b)
+        {
+            return Err(unsupported(
+                "rope_scaling",
+                "conflicting type and rope_type",
+            ));
+        }
+        let number = |key: &str| -> Result<f32, InferError> {
+            let n = object.get(key).and_then(Value::as_f64).unwrap_or(f64::NAN) as f32;
+            if !n.is_finite() || n <= 0.0 {
+                return Err(unsupported(
+                    "rope_scaling",
+                    format!("{key} must be positive and finite"),
+                ));
+            }
+            Ok(n)
+        };
+        let allowed: &[&str] = match kind {
+            "linear" => &["type", "rope_type", "factor"],
+            "llama3" => &[
+                "type",
+                "rope_type",
+                "factor",
+                "low_freq_factor",
+                "high_freq_factor",
+                "original_max_position_embeddings",
+            ],
+            _ => {
+                return Err(unsupported(
+                    "rope_scaling",
+                    format!("{kind:?}; supported: linear, llama3"),
+                ));
+            },
+        };
+        if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(unsupported(
+                "rope_scaling",
+                "unimplemented scaling parameters",
+            ));
+        }
+        let factor = number("factor")?;
+        if factor < 1.0 {
+            return Err(unsupported("rope_scaling", "factor must be at least one"));
+        }
+        match kind {
+            "linear" => Ok(Self::Linear { factor }),
+            "llama3" => {
+                let low_freq_factor = number("low_freq_factor")?;
+                let high_freq_factor = number("high_freq_factor")?;
+                let original_max_position_embeddings = object
+                    .get("original_max_position_embeddings")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| {
+                        unsupported(
+                            "rope_scaling",
+                            "original context must be a positive integer",
+                        )
+                    })?;
+                if high_freq_factor <= low_freq_factor {
+                    return Err(unsupported(
+                        "rope_scaling",
+                        "high frequency factor must exceed low frequency factor",
+                    ));
+                }
+                Ok(Self::Llama3 {
+                    factor,
+                    low_freq_factor,
+                    high_freq_factor,
+                    original_max_position_embeddings,
+                })
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn apply(&self, frequency: f32) -> f32 {
+        match *self {
+            Self::Linear { factor } => frequency / factor,
+            Self::Llama3 {
+                factor,
+                low_freq_factor,
+                high_freq_factor,
+                original_max_position_embeddings,
+            } => {
+                let wavelength = std::f32::consts::TAU / frequency;
+                let original = original_max_position_embeddings as f32;
+                if wavelength < original / high_freq_factor {
+                    return frequency;
+                }
+                if wavelength > original / low_freq_factor {
+                    return frequency / factor;
+                }
+                let smooth = (original / wavelength - low_freq_factor)
+                    / (high_freq_factor - low_freq_factor);
+                (1.0 - smooth) * frequency / factor + smooth * frequency
+            },
+        }
+    }
+}
 
 /// The config fields that decide whether a checkpoint is a Llama block at
 /// all. Every field is optional so synthetic test configs without them
@@ -52,15 +201,7 @@ struct ArchitectureFields {
     #[serde(default)]
     partial_rotary_factor: Option<f64>,
     #[serde(default)]
-    head_dim: Option<usize>,
-    #[serde(default)]
-    attention_bias: Option<bool>,
-    #[serde(default)]
     mlp_bias: Option<bool>,
-    #[serde(default)]
-    sliding_window: Option<usize>,
-    #[serde(default)]
-    use_sliding_window: Option<bool>,
     #[serde(default)]
     attn_logit_softcapping: Option<f64>,
     #[serde(default)]
@@ -131,12 +272,6 @@ impl ArchitectureFields {
                 ));
             }
         }
-        if let Some(scaling) = &self.rope_scaling {
-            return Err(unsupported(
-                "rope_scaling",
-                format!("{scaling}; only unscaled RoPE (rope_theta) is implemented"),
-            ));
-        }
         if let Some(factor) = self.partial_rotary_factor
             && factor != 1.0
         {
@@ -145,36 +280,8 @@ impl ArchitectureFields {
                 format!("{factor}; RoPE is applied to the full head"),
             ));
         }
-        if let Some(head_dim) = self.head_dim
-            && head_dim != config.head_dim()
-        {
-            return Err(unsupported(
-                "head_dim",
-                format!(
-                    "{head_dim} differs from hidden_size / num_attention_heads = {}",
-                    config.head_dim()
-                ),
-            ));
-        }
-        for (field, bias) in [
-            ("attention_bias", self.attention_bias),
-            ("mlp_bias", self.mlp_bias),
-        ] {
-            if bias == Some(true) {
-                return Err(unsupported(field, "projections are bias-free"));
-            }
-        }
-        if let Some(window) = self.sliding_window
-            && self.use_sliding_window != Some(false)
-            && window < config.max_position_embeddings
-        {
-            return Err(unsupported(
-                "sliding_window",
-                format!(
-                    "{window} is shorter than max_position_embeddings {}; attention is full causal",
-                    config.max_position_embeddings
-                ),
-            ));
+        if self.mlp_bias == Some(true) {
+            return Err(unsupported("mlp_bias", "MLP projections are bias-free"));
         }
         for (field, cap) in [
             ("attn_logit_softcapping", self.attn_logit_softcapping),
@@ -193,6 +300,9 @@ impl ArchitectureFields {
             ("n_routed_experts", self.n_routed_experts),
             ("num_experts_per_tok", self.num_experts_per_tok),
         ] {
+            if config.moe.is_some() && matches!(field, "num_experts" | "num_experts_per_tok") {
+                continue;
+            }
             if let Some(n) = experts
                 && n > 0
             {
@@ -210,6 +320,24 @@ impl ArchitectureFields {
 /// `config.json` field names.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DecoderConfig {
+    #[serde(skip)]
+    pub moe: Option<MoeConfig>,
+    #[serde(default)]
+    pub model_type: Option<String>,
+    #[serde(default)]
+    pub head_dim: Option<usize>,
+    #[serde(default)]
+    pub attention_bias: bool,
+    #[serde(default)]
+    pub sliding_window: Option<usize>,
+    #[serde(default)]
+    pub use_sliding_window: Option<bool>,
+    #[serde(default)]
+    pub max_window_layers: Option<usize>,
+    #[serde(default)]
+    pub layer_types: Option<Vec<String>>,
+    #[serde(skip)]
+    pub rope_scaling: Option<RopeScaling>,
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -265,7 +393,38 @@ impl DecoderConfig {
             |e: serde_json::Error| InferError::InvalidConfig(format!("config.json parse: {e}"));
         let architecture: ArchitectureFields = serde_json::from_slice(bytes).map_err(parse)?;
         architecture.refuse_foreign()?;
-        let config: Self = serde_json::from_slice(bytes).map_err(parse)?;
+        let mut config: Self = serde_json::from_slice(bytes).map_err(parse)?;
+        if let Some(architectures) = &architecture.architectures {
+            for name in architectures {
+                let family = match name.as_str() {
+                    "LlamaForCausalLM" => "llama",
+                    "MistralForCausalLM" => "mistral",
+                    "Qwen2ForCausalLM" => "qwen2",
+                    "Qwen3ForCausalLM" => "qwen3",
+                    "Qwen2MoeForCausalLM" => "qwen2_moe",
+                    _ => unreachable!("foreign architecture refused"),
+                };
+                if config
+                    .model_type
+                    .as_deref()
+                    .is_some_and(|kind| kind != family)
+                {
+                    return Err(unsupported(
+                        "architectures",
+                        "architecture and model_type disagree",
+                    ));
+                }
+                config.model_type = Some(family.into());
+            }
+        }
+        config.rope_scaling = architecture
+            .rope_scaling
+            .as_ref()
+            .map(RopeScaling::parse)
+            .transpose()?;
+        if config.model_type.as_deref() == Some("qwen2_moe") {
+            config.moe = Some(serde_json::from_slice(bytes).map_err(parse)?);
+        }
         config.validate()?;
         architecture.refuse_features(&config)?;
         Ok(config)
@@ -278,7 +437,51 @@ impl DecoderConfig {
 
     /// Per-head dimension.
     pub fn head_dim(&self) -> usize {
-        self.hidden_size / self.num_attention_heads
+        self.head_dim
+            .unwrap_or_else(|| self.hidden_size / self.num_attention_heads)
+    }
+
+    pub fn query_width(&self) -> usize {
+        self.num_attention_heads * self.head_dim()
+    }
+
+    pub fn qkv_bias(&self) -> bool {
+        matches!(self.model_type.as_deref(), Some("qwen2" | "qwen2_moe")) || self.attention_bias
+    }
+
+    pub fn output_bias(&self) -> bool {
+        !matches!(self.model_type.as_deref(), Some("qwen2" | "qwen2_moe")) && self.attention_bias
+    }
+
+    pub fn qk_norm(&self) -> bool {
+        self.model_type.as_deref() == Some("qwen3")
+    }
+
+    pub fn layer_is_moe(&self, index: usize) -> bool {
+        self.moe.as_ref().is_some_and(|m| {
+            !m.mlp_only_layers.contains(&index) && (index + 1).is_multiple_of(m.decoder_sparse_step)
+        })
+    }
+
+    pub fn layer_window(&self, index: usize) -> Option<usize> {
+        if let Some(types) = &self.layer_types {
+            return (types[index] == "sliding_attention")
+                .then_some(self.sliding_window)
+                .flatten();
+        }
+        if self.use_sliding_window == Some(false) {
+            return None;
+        }
+        if matches!(
+            self.model_type.as_deref(),
+            Some("qwen2" | "qwen3" | "qwen2_moe")
+        ) {
+            return (self.use_sliding_window == Some(true)
+                && index >= self.max_window_layers.unwrap_or(28))
+            .then_some(self.sliding_window)
+            .flatten();
+        }
+        self.sliding_window
     }
 
     /// Query heads served by each key/value head.
@@ -288,25 +491,80 @@ impl DecoderConfig {
 
     fn validate(&self) -> Result<(), InferError> {
         if self.num_attention_heads == 0
-            || !self.hidden_size.is_multiple_of(self.num_attention_heads)
+            || (self.head_dim.is_none()
+                && !self.hidden_size.is_multiple_of(self.num_attention_heads))
         {
             return Err(InferError::InvalidConfig(format!(
                 "hidden_size {} not divisible by num_attention_heads {}",
                 self.hidden_size, self.num_attention_heads
             )));
         }
-        if !self.num_attention_heads.is_multiple_of(self.kv_heads()) {
+        if self.kv_heads() == 0 || !self.num_attention_heads.is_multiple_of(self.kv_heads()) {
             return Err(InferError::InvalidConfig(format!(
                 "num_attention_heads {} not divisible by num_key_value_heads {}",
                 self.num_attention_heads,
                 self.kv_heads()
             )));
         }
-        if !self.head_dim().is_multiple_of(2) {
+        if self.head_dim() == 0 || !self.head_dim().is_multiple_of(2) {
             return Err(InferError::InvalidConfig(format!(
                 "head_dim {} must be even for rotary encoding",
                 self.head_dim()
             )));
+        }
+        if self.hidden_size == 0
+            || self.intermediate_size == 0
+            || self.vocab_size == 0
+            || self.num_hidden_layers == 0
+            || self.max_position_embeddings == 0
+            || !self.rms_norm_eps.is_finite()
+            || self.rms_norm_eps <= 0.0
+            || !self.rope_theta.is_finite()
+            || self.rope_theta <= 0.0
+            || self.sliding_window == Some(0)
+            || self
+                .num_attention_heads
+                .checked_mul(self.head_dim())
+                .is_none()
+            || self.kv_heads().checked_mul(self.head_dim()).is_none()
+        {
+            return Err(InferError::InvalidConfig(
+                "zero, non-finite or overflowing decoder dimensions/settings".into(),
+            ));
+        }
+        if let Some(types) = &self.layer_types
+            && (types.len() != self.num_hidden_layers
+                || types.iter().any(|kind| {
+                    kind != "full_attention" && kind != "sliding_attention"
+                        || kind == "sliding_attention" && self.sliding_window.is_none()
+                }))
+        {
+            return Err(unsupported(
+                "layer_types",
+                "expected one supported attention type per layer and a window for sliding layers",
+            ));
+        }
+        if let Some(moe) = &self.moe
+            && (moe.num_experts == 0
+                || moe.num_experts_per_tok == 0
+                || moe.num_experts_per_tok > moe.num_experts
+                || moe.moe_intermediate_size == 0
+                || moe.shared_expert_intermediate_size == 0
+                || moe.decoder_sparse_step == 0
+                || moe
+                    .mlp_only_layers
+                    .iter()
+                    .any(|index| *index >= self.num_hidden_layers)
+                || moe
+                    .num_experts
+                    .checked_mul(moe.moe_intermediate_size)
+                    .and_then(|n| n.checked_mul(self.hidden_size))
+                    .is_none())
+        {
+            return Err(unsupported(
+                "experts",
+                "invalid expert count, routing, intermediate size or sparse-layer selection",
+            ));
         }
         Ok(())
     }
@@ -412,7 +670,7 @@ mod tests {
     #[test]
     fn foreign_model_type_refused() {
         assert_eq!(
-            refused_field(serde_json::json!({"model_type": "qwen2"})),
+            refused_field(serde_json::json!({"model_type": "gemma2"})),
             "config.model_type"
         );
     }
@@ -420,7 +678,7 @@ mod tests {
     #[test]
     fn foreign_architecture_refused() {
         assert_eq!(
-            refused_field(serde_json::json!({"architectures": ["MistralForCausalLM"]})),
+            refused_field(serde_json::json!({"architectures": ["GemmaForCausalLM"]})),
             "config.architectures"
         );
     }
@@ -439,14 +697,28 @@ mod tests {
     }
 
     #[test]
-    fn rope_scaling_refused() {
-        // Llama 3.1 to 3.3 carry this; unscaled RoPE would answer wrongly.
+    fn llama3_scaling_is_validated_and_unknown_scaling_is_refused() {
         let scaling = serde_json::json!({"rope_scaling": {
             "rope_type": "llama3", "factor": 32.0,
             "low_freq_factor": 1.0, "high_freq_factor": 4.0,
             "original_max_position_embeddings": 8192
         }});
-        assert_eq!(refused_field(scaling), "config.rope_scaling");
+        assert!(matches!(
+            DecoderConfig::from_json_bytes(&tiny_with(scaling))
+                .unwrap()
+                .rope_scaling,
+            Some(RopeScaling::Llama3 { .. })
+        ));
+        assert_eq!(
+            refused_field(serde_json::json!({"rope_scaling":{"rope_type":"yarn", "factor": 4}})),
+            "config.rope_scaling"
+        );
+        assert_eq!(
+            refused_field(
+                serde_json::json!({"rope_scaling":{"rope_type":"llama3", "factor": 4,"low_freq_factor":4,"high_freq_factor":1,"original_max_position_embeddings":8192}})
+            ),
+            "config.rope_scaling"
+        );
     }
 
     #[test]
@@ -462,19 +734,24 @@ mod tests {
     }
 
     #[test]
-    fn explicit_head_dim_mismatch_refused() {
-        // Qwen3 and Mistral NeMo state head_dim apart from hidden / heads.
-        assert_eq!(
-            refused_field(serde_json::json!({"head_dim": 4})),
-            "config.head_dim"
+    fn independent_query_width_and_zero_kv_heads_are_validated() {
+        let c =
+            DecoderConfig::from_json_bytes(&tiny_with(serde_json::json!({"head_dim": 4}))).unwrap();
+        assert_eq!(c.query_width(), 16);
+        assert!(
+            DecoderConfig::from_json_bytes(&tiny_with(
+                serde_json::json!({"num_key_value_heads":0})
+            ))
+            .is_err()
         );
     }
 
     #[test]
     fn biases_refused() {
-        assert_eq!(
-            refused_field(serde_json::json!({"attention_bias": true})),
-            "config.attention_bias"
+        assert!(
+            DecoderConfig::from_json_bytes(&tiny_with(serde_json::json!({"attention_bias":true})))
+                .unwrap()
+                .output_bias()
         );
         assert_eq!(
             refused_field(serde_json::json!({"mlp_bias": true})),
@@ -483,11 +760,10 @@ mod tests {
     }
 
     #[test]
-    fn effective_sliding_window_refused() {
-        assert_eq!(
-            refused_field(serde_json::json!({"sliding_window": 8})),
-            "config.sliding_window"
-        );
+    fn effective_and_disabled_sliding_windows() {
+        let c = DecoderConfig::from_json_bytes(&tiny_with(serde_json::json!({"sliding_window":8})))
+            .unwrap();
+        assert_eq!(c.layer_window(0), Some(8));
         // Disabled, or no shorter than the context, it cannot take effect.
         DecoderConfig::from_json_bytes(&tiny_with(
             serde_json::json!({"sliding_window": 8, "use_sliding_window": false}),
@@ -495,6 +771,16 @@ mod tests {
         .unwrap();
         DecoderConfig::from_json_bytes(&tiny_with(serde_json::json!({"sliding_window": 16})))
             .unwrap();
+        assert_eq!(
+            refused_field(serde_json::json!({"layer_types":["mystery","full_attention"]})),
+            "config.layer_types"
+        );
+        assert_eq!(
+            refused_field(
+                serde_json::json!({"model_type":"qwen3","architectures":["LlamaForCausalLM"]})
+            ),
+            "config.architectures"
+        );
     }
 
     #[test]

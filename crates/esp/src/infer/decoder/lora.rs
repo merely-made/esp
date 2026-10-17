@@ -81,7 +81,8 @@ pub(crate) fn dimensions(
     let h = config.hidden_size;
     let kv = config.kv_heads() * config.head_dim();
     match module {
-        "q_proj" | "o_proj" => Ok((h, h)),
+        "q_proj" => Ok((h, config.query_width())),
+        "o_proj" => Ok((config.query_width(), h)),
         "k_proj" | "v_proj" => Ok((h, kv)),
         other => Err(InferError::InvalidConfig(format!(
             "PEFT LoRA target module {other:?} is not supported; expected llama q/k/v/o projections"
@@ -273,6 +274,9 @@ impl AdapterLoader for PeftLoraAdapterLoader<'_> {
             ));
         }
         let config = DecoderConfig::from_json_bytes(self.config_bytes)?;
+        if config.moe.is_some() {
+            return Err(InferError::Unsupported { feature: "MoE adapters/training".into(), detail: "expert routing is inference-only; a differentiable routing path needs separate qualification".into() });
+        }
         let mut loaded = load_decoder_tensors_from_bytes(&config, self.base_weights, &self.device)?;
         for ((selection, artifact), index) in
             session.adapters.iter().zip(artifacts.iter()).zip(0usize..)

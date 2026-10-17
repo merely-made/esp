@@ -8,6 +8,7 @@
 //! artifacts, never an entire checkpoint. No network acquisition lives here.
 
 use super::super::InferError;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A host-owned source of standalone safetensors layer artifacts.
@@ -15,6 +16,58 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// allocating, and verify content identity before returning bytes.
 pub trait LayerSource: Send + Sync {
     fn read_layer(&self, index: usize, limit: usize) -> Result<Vec<u8>, InferError>;
+    fn read_expert(
+        &self,
+        _layer: usize,
+        _expert: usize,
+        _limit: usize,
+    ) -> Result<Vec<u8>, InferError> {
+        Err(InferError::InvalidWeights(
+            "layer source has no expert reader".into(),
+        ))
+    }
+}
+
+/// Compose host-owned verified artifact readers without acquiring any network
+/// or durable-store authority inside the decoder.
+pub fn with_expert_reader<L, E>(layers: L, experts: E) -> impl LayerSource
+where
+    L: Fn(usize, usize) -> Result<Vec<u8>, InferError> + Send + Sync,
+    E: Fn(usize, usize, usize) -> Result<Vec<u8>, InferError> + Send + Sync,
+{
+    struct Readers<L, E>(L, E);
+    impl<L, E> LayerSource for Readers<L, E>
+    where
+        L: Fn(usize, usize) -> Result<Vec<u8>, InferError> + Send + Sync,
+        E: Fn(usize, usize, usize) -> Result<Vec<u8>, InferError> + Send + Sync,
+    {
+        fn read_layer(&self, index: usize, limit: usize) -> Result<Vec<u8>, InferError> {
+            self.0(index, limit)
+        }
+        fn read_expert(
+            &self,
+            layer: usize,
+            expert: usize,
+            limit: usize,
+        ) -> Result<Vec<u8>, InferError> {
+            self.1(layer, expert, limit)
+        }
+    }
+    Readers(layers, experts)
+}
+
+impl LayerSource for Arc<dyn LayerSource> {
+    fn read_layer(&self, index: usize, limit: usize) -> Result<Vec<u8>, InferError> {
+        (**self).read_layer(index, limit)
+    }
+    fn read_expert(
+        &self,
+        layer: usize,
+        expert: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>, InferError> {
+        (**self).read_expert(layer, expert, limit)
+    }
 }
 
 impl<F> LayerSource for F
@@ -63,10 +116,21 @@ pub struct StreamingReadStats {
     pub layer_reads: u64,
     pub encoded_bytes_read: u64,
     pub largest_encoded_layer: u64,
+    pub expert_reads: u64,
+    pub expert_encoded_bytes_read: u64,
+    pub largest_encoded_expert: u64,
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct ExpertReads {
+    pub count: AtomicU64,
+    pub bytes: AtomicU64,
+    pub largest: AtomicU64,
 }
 
 pub(crate) struct StreamingLayers {
-    pub source: Box<dyn LayerSource>,
+    pub source: Arc<dyn LayerSource>,
+    pub expert_reads: Arc<ExpertReads>,
     pub options: StreamingOptions,
     reads: AtomicU64,
     bytes: AtomicU64,
@@ -84,7 +148,8 @@ impl std::fmt::Debug for StreamingLayers {
 impl StreamingLayers {
     pub fn new(source: Box<dyn LayerSource>, options: StreamingOptions) -> Self {
         Self {
-            source,
+            source: Arc::from(source),
+            expert_reads: Arc::new(ExpertReads::default()),
             options,
             reads: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -113,6 +178,9 @@ impl StreamingLayers {
             layer_reads: self.reads.load(Ordering::Relaxed),
             encoded_bytes_read: self.bytes.load(Ordering::Relaxed),
             largest_encoded_layer: self.largest.load(Ordering::Relaxed),
+            expert_reads: self.expert_reads.count.load(Ordering::Relaxed),
+            expert_encoded_bytes_read: self.expert_reads.bytes.load(Ordering::Relaxed),
+            largest_encoded_expert: self.expert_reads.largest.load(Ordering::Relaxed),
         }
     }
 }

@@ -8,7 +8,10 @@
 //! exact tensor ranges; the source checkpoint is never read into one buffer.
 //! The resident uses the resulting immutable library artifacts, not paths.
 
-use super::{DecoderConfig, loader::LAYER_TENSORS};
+use super::{
+    DecoderConfig,
+    loader::{expert_tensor_names, layer_all_tensor_names, layer_core_tensor_names},
+};
 use crate::infer::InferError;
 use safetensors::tensor::{Dtype, Metadata, TensorInfo, TensorView};
 use std::collections::{BTreeMap, HashSet};
@@ -37,6 +40,7 @@ pub struct CheckpointReader {
     shards: Vec<Shard>,
     locations: BTreeMap<String, Location>,
     bytes_read: u64,
+    config: DecoderConfig,
 }
 
 impl CheckpointReader {
@@ -77,6 +81,7 @@ impl CheckpointReader {
             shards: Vec::new(),
             locations: BTreeMap::new(),
             bytes_read: 0,
+            config: config.clone(),
         };
         for name in files {
             // Index names are checkpoint basenames, never arbitrary paths or
@@ -156,7 +161,7 @@ impl CheckpointReader {
             .map(str::to_owned)
             .collect();
         for i in 0..config.num_hidden_layers {
-            for suffix in LAYER_TENSORS {
+            for suffix in layer_all_tensor_names(config, i) {
                 expected.insert(format!("model.layers.{i}.{suffix}"));
             }
         }
@@ -183,6 +188,23 @@ impl CheckpointReader {
         self.bytes_read
     }
 
+    pub fn f32_weight_payload_bytes(&self) -> Result<u64, InferError> {
+        let bytes = self
+            .locations
+            .iter()
+            .filter(|(name, _)| !name.ends_with(".rotary_emb.inv_freq"))
+            .try_fold(0u128, |sum, (_, location)| {
+                let count = location
+                    .info
+                    .shape
+                    .iter()
+                    .try_fold(1u128, |n, size| n.checked_mul(*size as u128))?;
+                sum.checked_add(count.checked_mul(4)?)
+            })
+            .ok_or_else(|| invalid("runtime weight payload overflow"))?;
+        u64::try_from(bytes).map_err(|_| invalid("runtime weight payload overflow"))
+    }
+
     pub fn shared_bytes(&mut self, limit: usize) -> Result<Vec<u8>, InferError> {
         let names = self
             .locations
@@ -199,11 +221,26 @@ impl CheckpointReader {
     }
 
     pub fn layer_bytes(&mut self, index: usize, limit: usize) -> Result<Vec<u8>, InferError> {
-        let names = LAYER_TENSORS
+        let names = layer_core_tensor_names(&self.config, index)
             .iter()
             .map(|suffix| format!("model.layers.{index}.{suffix}"))
             .collect();
         self.pack(names, limit)
+    }
+
+    pub fn expert_bytes(
+        &mut self,
+        layer: usize,
+        expert: usize,
+        limit: usize,
+    ) -> Result<Vec<u8>, InferError> {
+        if layer >= self.config.num_hidden_layers
+            || !self.config.layer_is_moe(layer)
+            || expert >= self.config.moe.as_ref().unwrap().num_experts
+        {
+            return Err(invalid("expert outside the declared sparse layer"));
+        }
+        self.pack(expert_tensor_names(layer, expert), limit)
     }
 
     fn pack(&mut self, names: Vec<String>, limit: usize) -> Result<Vec<u8>, InferError> {

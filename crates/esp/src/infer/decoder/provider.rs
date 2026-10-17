@@ -37,6 +37,7 @@ pub struct DecoderProvider {
     tokenizer: Tokenizer,
     capability: ModelCapability,
     add_special_tokens: bool,
+    eos_token_ids: Vec<u32>,
 }
 
 /// Decoder-specific details that the portable [`InferenceProvider`] seam does
@@ -210,11 +211,13 @@ impl DecoderProvider {
             loader: loader.into(),
             streaming: true,
         };
+        let eos_token_ids = model.config().eos_token_id.clone();
         Self {
             model,
             tokenizer,
             capability,
             add_special_tokens: true,
+            eos_token_ids,
         }
     }
 
@@ -225,8 +228,24 @@ impl DecoderProvider {
         self
     }
 
+    /// An exact template may declare an end-of-turn token absent from the
+    /// base config (for example Qwen2's instruct generation defaults). It is
+    /// session data, so finish before committing/emitting that control token.
+    pub fn with_template_eos(mut self, eos: &str) -> Self {
+        if let Some(id) = self.tokenizer.token_to_id(eos)
+            && !self.eos_token_ids.contains(&id)
+        {
+            self.eos_token_ids.push(id);
+        }
+        self
+    }
+
     pub fn streaming_stats(&self) -> Option<super::streaming::StreamingReadStats> {
         self.model.streaming_stats()
+    }
+
+    pub fn shared_matrix_layout(&self) -> Option<super::model::SharedMatrixLayout> {
+        self.model.shared_matrix_layout()
     }
 
     /// Build from the HF artifact triple as byte buffers — the shape
@@ -306,12 +325,28 @@ impl DecoderProvider {
             ));
         }
         format.validate_device(device)?;
-        let shared = super::loader::load_decoder_shared_tensors_with_format(
-            &config, &tensors, device, format,
-        )?;
-        let model = DecoderModel::from_layer_source_with_format(
-            config, shared, source, options, device, format,
-        )?;
+        let model = if config.moe.is_some() {
+            if format != super::WeightFormat::F32 {
+                return Err(InferError::Unsupported {
+                    feature: "MoE format".into(),
+                    detail: "expert execution currently requires f32".into(),
+                });
+            }
+            let shared = super::loader::load_shared_shards(
+                &config,
+                &tensors,
+                device,
+                options.max_layer_bytes,
+            )?;
+            DecoderModel::from_sharded_shared_source(config, shared, source, options, device)?
+        } else {
+            let shared = super::loader::load_decoder_shared_tensors_with_format(
+                &config, &tensors, device, format,
+            )?;
+            DecoderModel::from_layer_source_with_format(
+                config, shared, source, options, device, format,
+            )?
+        };
         let mut provider = Self::from_parts(model, tokenizer, model_id, loader);
         provider.capability.quantization =
             (format != super::WeightFormat::F32).then(|| format.id().into());
@@ -420,7 +455,7 @@ impl DecoderProvider {
             &self.model,
             &prompt_ids,
             max_new,
-            &self.model.config().eos_token_id,
+            &self.eos_token_ids,
             &mut picker,
             &mut |token| observer.observe(token),
         )?;
@@ -460,7 +495,7 @@ impl DecoderProvider {
             &self.model,
             &prompt_ids,
             max_new,
-            &self.model.config().eos_token_id,
+            &self.eos_token_ids,
             &mut picker,
             should_cancel,
             &mut |token| observer.observe(token),
@@ -564,7 +599,7 @@ impl InferenceProvider for DecoderProvider {
             }
             let token = picker.pick(&logits);
             cp.draws += u64::from(sampled);
-            if self.model.config().eos_token_id.contains(&token) {
+            if self.eos_token_ids.contains(&token) {
                 cp.complete = true;
             } else {
                 cp.token_ids.push(token);
@@ -647,6 +682,21 @@ mod tests {
             max_tokens,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn template_end_token_finishes_before_committing_its_id() {
+        let request = request("t1", 4);
+        let ordinary = provider()
+            .generate_checkpointed(&request, None, &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        let first = *ordinary.token_ids.first().unwrap();
+        let stopped = provider()
+            .with_template_eos(&format!("t{first}"))
+            .generate_checkpointed(&request, None, &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        assert!(stopped.token_ids.is_empty());
+        assert!(stopped.text.is_empty());
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! cached path is proven equal to naive full recompute by the
 //! generation tests.
 
-use burn::nn::Linear;
+use burn::nn::{Linear, RmsNorm};
 use burn::tensor::activation::softmax;
 use burn::tensor::{Bool, Device, Tensor, TensorData};
 
@@ -44,6 +44,26 @@ impl LlamaRotaryEncoding {
     /// Precompute Llama rotary frequencies through the configured context
     /// window.
     pub fn new(max_sequence_length: usize, head_dim: usize, theta: f32, device: &Device) -> Self {
+        Self::with_scaling(max_sequence_length, head_dim, theta, None, device)
+    }
+
+    pub fn for_config(config: &DecoderConfig, device: &Device) -> Self {
+        Self::with_scaling(
+            config.max_position_embeddings,
+            config.head_dim(),
+            config.rope_theta,
+            config.rope_scaling.as_ref(),
+            device,
+        )
+    }
+
+    fn with_scaling(
+        max_sequence_length: usize,
+        head_dim: usize,
+        theta: f32,
+        scaling: Option<&super::config::RopeScaling>,
+        device: &Device,
+    ) -> Self {
         assert!(head_dim.is_multiple_of(2), "rotary head_dim must be even");
         let half = head_dim / 2;
         let mut cos = Vec::with_capacity(max_sequence_length * head_dim);
@@ -53,6 +73,8 @@ impl LlamaRotaryEncoding {
             let mut row_sin = Vec::with_capacity(half);
             for index in 0..half {
                 let inverse_frequency = 1.0 / theta.powf((2 * index) as f32 / head_dim as f32);
+                let inverse_frequency =
+                    scaling.map_or(inverse_frequency, |s| s.apply(inverse_frequency));
                 let angle = position as f32 * inverse_frequency;
                 row_cos.push(angle.cos());
                 row_sin.push(angle.sin());
@@ -145,6 +167,19 @@ pub(crate) fn linear_no_bias_from_loaded(weight: Tensor<2>, _device: &Device) ->
     }
 }
 
+/// Additional attention tensors are declared by the config, never inferred
+/// from an unread checkpoint. Their absence/presence is checked by the loader.
+#[derive(Clone, Default)]
+pub struct LoadedAttentionOptions {
+    pub q_bias: Option<Tensor<1>>,
+    pub k_bias: Option<Tensor<1>>,
+    pub v_bias: Option<Tensor<1>>,
+    pub o_bias: Option<Tensor<1>>,
+    pub q_norm: Option<Tensor<1>>,
+    pub k_norm: Option<Tensor<1>>,
+    pub layer_index: usize,
+}
+
 /// Wrap an already-materialized tensor as a module parameter **without**
 /// asserting that it is a tracked autodiff leaf.
 ///
@@ -175,6 +210,9 @@ pub struct DecoderAttention {
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
+    q_norm: Option<RmsNorm>,
+    k_norm: Option<RmsNorm>,
+    window: Option<usize>,
 }
 
 impl DecoderAttention {
@@ -188,14 +226,42 @@ impl DecoderAttention {
         o_w: Tensor<2>,
         device: &Device,
     ) -> Self {
+        Self::from_loaded_with_options(
+            config,
+            q_w,
+            k_w,
+            v_w,
+            o_w,
+            LoadedAttentionOptions::default(),
+            device,
+        )
+    }
+
+    pub fn from_loaded_with_options(
+        config: &DecoderConfig,
+        q_w: Tensor<2>,
+        k_w: Tensor<2>,
+        v_w: Tensor<2>,
+        o_w: Tensor<2>,
+        options: LoadedAttentionOptions,
+        device: &Device,
+    ) -> Self {
+        let linear = |w, bias: Option<Tensor<1>>| Linear {
+            weight: adopt_param(w),
+            bias: bias.map(adopt_param),
+        };
+        let norm = |weight| super::layer::rms_norm_from_loaded(weight, config.rms_norm_eps, device);
         Self {
-            q_proj: linear_no_bias_from_loaded(q_w, device),
-            k_proj: linear_no_bias_from_loaded(k_w, device),
-            v_proj: linear_no_bias_from_loaded(v_w, device),
-            o_proj: linear_no_bias_from_loaded(o_w, device),
+            q_proj: linear(q_w, options.q_bias),
+            k_proj: linear(k_w, options.k_bias),
+            v_proj: linear(v_w, options.v_bias),
+            o_proj: linear(o_w, options.o_bias),
             n_heads: config.num_attention_heads,
             n_kv_heads: config.kv_heads(),
             head_dim: config.head_dim(),
+            q_norm: options.q_norm.map(norm),
+            k_norm: options.k_norm.map(norm),
+            window: config.layer_window(options.layer_index),
         }
     }
 
@@ -236,7 +302,7 @@ impl DecoderAttention {
         query_chunk: usize,
     ) -> Result<Tensor<3>, crate::infer::InferError> {
         assert!(query_chunk > 0, "query chunk must be positive");
-        let [batch, seq, hidden] = x.dims();
+        let [batch, seq, _hidden] = x.dims();
         let past = cache.cached_len();
         assert!(
             past == 0 || seq == 1,
@@ -251,6 +317,14 @@ impl DecoderAttention {
         let q = split(self.q_proj.forward(x.clone()), self.n_heads);
         let k = split(self.k_proj.forward(x.clone()), self.n_kv_heads);
         let v = split(self.v_proj.forward(x), self.n_kv_heads);
+        let q = self
+            .q_norm
+            .as_ref()
+            .map_or_else(|| q.clone(), |norm| norm.forward(q.clone()));
+        let k = self
+            .k_norm
+            .as_ref()
+            .map_or_else(|| k.clone(), |norm| norm.forward(k.clone()));
 
         // Rotate q and this step's k by absolute position; cached keys
         // were rotated when they were appended.
@@ -290,17 +364,31 @@ impl DecoderAttention {
             let mut scores = queries
                 .matmul(keys.clone())
                 .div_scalar((self.head_dim as f32).sqrt());
-            if seq > 1 {
-                let mask =
-                    Tensor::<2, Bool>::tril_mask([count, total], (past + first) as i64, &device)
-                        .unsqueeze::<4>()
-                        .expand([batch, self.n_heads, count, total]);
+            if seq > 1 || self.window.is_some() {
+                let mask = Tensor::<2, Bool>::from_data(
+                    TensorData::new(
+                        (first..end)
+                            .flat_map(|query| {
+                                (0..total).map(move |key| {
+                                    key > past + query
+                                        || self.window.is_some_and(|window| {
+                                            past + query - key.min(past + query) >= window
+                                        })
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                        [count, total],
+                    ),
+                    &device,
+                )
+                .unsqueeze::<4>()
+                .expand([batch, self.n_heads, count, total]);
                 scores = scores.mask_fill(mask, f32::NEG_INFINITY);
             }
             let out = softmax(scores, 3)
                 .matmul(v_all.clone())
                 .swap_dims(1, 2)
-                .reshape([batch, count, hidden]);
+                .reshape([batch, count, self.n_heads * self.head_dim]);
             // Force each chunk before building the next. Lazy GPU graphs must
             // not retain a score allocation for every query chunk at once.
             if query_chunk < seq {
