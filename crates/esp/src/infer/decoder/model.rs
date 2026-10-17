@@ -52,6 +52,7 @@ pub struct DecoderModel {
     streamed: Option<StreamingLayers>,
     format: super::WeightFormat,
     stages: Option<Box<dyn super::stage::StageExecutor>>,
+    resident_query_chunk: Option<usize>,
 }
 
 impl DecoderModel {
@@ -83,6 +84,7 @@ impl DecoderModel {
             streamed: None,
             format: super::WeightFormat::F32,
             stages: None,
+            resident_query_chunk: None,
         }
     }
 
@@ -150,6 +152,34 @@ impl DecoderModel {
 
     pub fn streaming_stats(&self) -> Option<StreamingReadStats> {
         self.streamed.as_ref().map(StreamingLayers::stats)
+    }
+
+    /// Retain verified indexed layers without changing format or prefill math.
+    /// The host admits weights and full context KV before this placement.
+    pub fn with_resident_layers(mut self) -> Result<Self, InferError> {
+        let Some(streamed) = self.streamed.as_ref() else {
+            return Ok(self);
+        };
+        let device = self.device();
+        let mut layers = Vec::with_capacity(self.config.num_hidden_layers);
+        for index in 0..self.config.num_hidden_layers {
+            let bytes = streamed.read(index)?;
+            let tensors = safetensors::SafeTensors::deserialize(&bytes)
+                .map_err(|e| InferError::InvalidWeights(e.to_string()))?;
+            super::loader::validate_layer_names(&tensors, index)?;
+            let loaded = super::loader::load_decoder_layer_with_format(
+                &self.config,
+                &tensors,
+                index,
+                &device,
+                self.format,
+            )?;
+            layers.push(DecoderLayer::from_loaded(&self.config, loaded, &device));
+        }
+        self.resident_query_chunk = Some(streamed.options.query_chunk);
+        self.layers = layers;
+        self.streamed = None;
+        Ok(self)
     }
 
     /// Replace layer streaming with a host-owned stage chain. Embedding and
@@ -327,7 +357,12 @@ impl DecoderModel {
             }
         } else {
             for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
-                h = layer.forward_cached(h, &self.rope, layer_cache, start);
+                h = match self.resident_query_chunk {
+                    Some(chunk) => {
+                        layer.forward_cached_chunked(h, &self.rope, layer_cache, start, chunk)?
+                    },
+                    None => layer.forward_cached(h, &self.rope, layer_cache, start),
+                };
             }
         }
         cache.position += seq;

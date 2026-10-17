@@ -198,6 +198,36 @@ async fn resolve_library_row(
 }
 
 impl ResolvedInferenceRow {
+    /// Validated geometry for host placement and transport bounds.
+    pub fn decoder_config(&self) -> Result<super::decoder::DecoderConfig, InferError> {
+        super::decoder::DecoderConfig::from_json_bytes(&self.model.components.config_bytes)
+    }
+
+    /// Full runtime weights and declared context KV. Hosts separately reserve
+    /// backend, activations, RoPE, allocator and artifact transfer memory.
+    pub fn resident_payload_bytes(&self) -> Result<u64, InferError> {
+        let c = self.decoder_config()?;
+        let format = self.weight_format().unwrap_or_default();
+        let h = c.hidden_size as u128;
+        let matrix = h.saturating_mul(c.vocab_size as u128);
+        let scalar = if format == WeightFormat::F32 { 4 } else { 2 };
+        let head = match format {
+            WeightFormat::Q8Block32 => matrix.saturating_add(matrix / 32 * 4),
+            WeightFormat::Q4Block32 => (matrix / 2).saturating_add(matrix / 32 * 4),
+            _ => matrix.saturating_mul(scalar),
+        };
+        let shared = matrix
+            .saturating_mul(scalar)
+            .saturating_add(h.saturating_mul(scalar))
+            .saturating_add(if c.tie_word_embeddings { 0 } else { head });
+        let layers = self
+            .stage_layer_costs()?
+            .iter()
+            .map(|b| *b as u128)
+            .sum::<u128>();
+        u64::try_from(layers.saturating_add(shared))
+            .map_err(|_| failure("resident payload size overflow"))
+    }
     /// Resident layer payload including KV at the declared context limit.
     /// Hosts reserve remaining shared/backend memory before assigning ranges.
     pub fn stage_layer_costs(&self) -> Result<Vec<u64>, InferError> {
@@ -295,7 +325,18 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Option<Box<dyn LayerSource>>,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
-        self.load_execution(device, loader, max_tokens, source, None)
+        self.load_execution(device, loader, max_tokens, source, None, false)
+    }
+
+    /// First rung of the same indexed session: all layers stay on this device.
+    pub fn load_resident_with_layer_source(
+        &self,
+        device: &DecoderDevice,
+        loader: &str,
+        max_tokens: usize,
+        source: Box<dyn LayerSource>,
+    ) -> Result<SessionProvider<DecoderProvider>, InferError> {
+        self.load_execution(device, loader, max_tokens, Some(source), None, true)
     }
 
     /// The stage chain is a placement of this exact layer-indexed session.
@@ -320,6 +361,7 @@ impl ResolvedInferenceRow {
                 ))
             })),
             Some(stages),
+            false,
         )
     }
 
@@ -370,6 +412,7 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Option<Box<dyn LayerSource>>,
         stages: Option<Box<dyn super::decoder::stage::StageExecutor>>,
+        resident: bool,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
         self.validate_qualification(loader)?;
         let provider = if let Some(index) = &self.layered {
@@ -399,6 +442,11 @@ impl ResolvedInferenceRow {
             )?
         }
         .with_literal_prompt();
+        let provider = if resident {
+            provider.with_resident_layers()?
+        } else {
+            provider
+        };
         let provider = if let Some(stages) = stages {
             provider.with_stages(stages)?
         } else {
