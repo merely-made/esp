@@ -99,6 +99,8 @@ def real(directory, template_path, model_id, revision, output):
     assert directory.parent.parent.name == 'models--' + model_id.replace('/', '--')
     torch.set_num_threads(4)
     template = json.loads(template_path.read_text(encoding="utf-8"))
+    max_tokens = int(os.environ.get('ESP_REFERENCE_MAX_TOKENS', '16'))
+    assert 0 < max_tokens <= 128
     tokenizer = AutoTokenizer.from_pretrained(directory, local_files_only=True, trust_remote_code=False)
     dtype=torch.bfloat16 if os.environ.get('ESP_REFERENCE_DTYPE')=='bf16' else torch.float32
     offload=os.environ.get('ESP_REFERENCE_OFFLOAD_DIR')
@@ -134,7 +136,7 @@ def real(directory, template_path, model_id, revision, output):
         past=None
         current=torch.tensor([sequence])
         with torch.no_grad():
-            for _ in range(16):
+            for _ in range(max_tokens):
                 result=model(current if offload else torch.tensor([sequence]),past_key_values=past,use_cache=bool(offload))
                 next_id = int(result.logits[0,-1].argmax())
                 print(json.dumps({'question':question,'step':len(tokens)+1,'token_id':next_id,'seconds':time.monotonic()-start}),flush=True)
@@ -156,7 +158,7 @@ def real(directory, template_path, model_id, revision, output):
         print(json.dumps({'hashed':name}),flush=True)
     output.write_text(json.dumps({'model_id':model_id,'revision':revision,
         'torch':torch.__version__,'transformers':transformers.__version__,
-        'dtype':str(dtype),'attention':'eager','max_tokens':16,
+        'dtype':str(dtype),'attention':'eager','max_tokens':max_tokens,
         'reference':'cached Transformers greedy tokens' if offload else 'full recomputation per greedy token', 'official_template_match':True,
         'template_sha256':hashlib.sha256(template_path.read_bytes()).hexdigest(),
         'artifacts':artifacts,'rows':rows},indent=2)+'\n',encoding='utf-8')
