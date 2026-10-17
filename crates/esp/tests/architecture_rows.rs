@@ -36,7 +36,8 @@ impl StageExecutor for SessionStage {
         Some(&self.session)
     }
     fn returns_logits(&self) -> bool {
-        self.stage.returns_logits()
+        // This fixture owns the full layer range and its final output head.
+        true
     }
     fn forward(
         &self,
