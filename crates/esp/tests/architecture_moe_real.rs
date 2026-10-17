@@ -86,7 +86,12 @@ fn larger_than_ram_moe_completes_with_selected_expert_streaming() {
     let mut store = muniment::RedbBackend::open(folder.join("model.redb")).unwrap();
     let template =
         PromptTemplate::from_bytes(include_bytes!("../templates/qwen2-instruct-v1.json")).unwrap();
-    let identity = serde_json::json!({"artifacts":reference["artifacts"],"template":template,"architecture":"qwen2_moe","expert_index_version":1});
+    let options = StreamingOptions {
+        query_chunk: 8,
+        max_layer_bytes: 1024 * 1024 * 1024,
+        max_shared_bytes: 3 * 1024 * 1024 * 1024,
+    };
+    let identity = serde_json::json!({"artifacts":reference["artifacts"],"template":template,"architecture":"qwen2_moe","expert_index_version":1,"options":options});
     let cached = std::fs::read(folder.join("row-cache.json"))
         .ok()
         .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap());
@@ -99,11 +104,6 @@ fn larger_than_ram_moe_completes_with_selected_expert_streaming() {
             assert_eq!(digest(&source.join(file)), hash.as_str().unwrap());
         }
         let start = Instant::now();
-        let options = StreamingOptions {
-            query_chunk: 8,
-            max_layer_bytes: 1024 * 1024 * 1024,
-            max_shared_bytes: 3 * 1024 * 1024 * 1024,
-        };
         eprintln!("importing independently addressed core layers and experts");
         let model = pollster::block_on(import_layered_model(
             &mut store,
@@ -157,7 +157,10 @@ fn larger_than_ram_moe_completes_with_selected_expert_streaming() {
             if checkpoint.token_ids.len()>1 && !checkpoint.complete {
                 assert_eq!(stats.expert_reads-last_reads,(config.num_hidden_layers*config.moe.as_ref().unwrap().num_experts_per_tok) as u64);
             }
-            if !checkpoint.token_ids.is_empty() {events.push(serde_json::json!({"at_token":checkpoint.token_ids.len(),"expert_reads":stats.expert_reads,"seconds":start.elapsed().as_secs_f64()}));}
+            if !checkpoint.token_ids.is_empty() {
+                eprintln!("{} token={} expert_reads={} seconds={:.3}",request.prompt,checkpoint.token_ids.len(),stats.expert_reads,start.elapsed().as_secs_f64());
+                events.push(serde_json::json!({"at_token":checkpoint.token_ids.len(),"expert_reads":stats.expert_reads,"seconds":start.elapsed().as_secs_f64()}));
+            }
             last_reads=stats.expert_reads;
             Ok(())
         },&mut ||false).unwrap();
@@ -181,6 +184,7 @@ fn larger_than_ram_moe_completes_with_selected_expert_streaming() {
         ..Default::default()
     };
     let count = std::cell::Cell::new(0);
+    eprintln!("checking serialized pause and provider reload at token 3");
     let paused = provider
         .generate_checkpointed(
             &request,
