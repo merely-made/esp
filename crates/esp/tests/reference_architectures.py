@@ -89,7 +89,7 @@ def main(destination):
         "torch": torch.__version__, "transformers": transformers.__version__,
         "implementation": "Transformers eager, float32, full recomputation per generated token",
         "cases": references,
-    }, indent=2) + "\n", encoding="utf-8")
+    }, indent=2) + "\n", encoding="utf-8", newline="\n")
     print(json.dumps({"cases": len(references), "bytes": sum(p.stat().st_size for p in destination.rglob('*') if p.is_file())}))
 
 
@@ -161,7 +161,7 @@ def real(directory, template_path, model_id, revision, output):
         'dtype':str(dtype),'attention':'eager','max_tokens':max_tokens,
         'reference':'cached Transformers greedy tokens' if offload else 'full recomputation per greedy token', 'official_template_match':True,
         'template_sha256':hashlib.sha256(template_path.read_bytes()).hexdigest(),
-        'artifacts':artifacts,'rows':rows},indent=2)+'\n',encoding='utf-8')
+        'artifacts':artifacts,'rows':rows},indent=2)+'\n',encoding='utf-8',newline='\n')
     print(json.dumps({'model':model_id, 'rows':len(rows),'output':str(output)}),flush=True)
 
 
