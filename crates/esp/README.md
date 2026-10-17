@@ -92,6 +92,13 @@ Expert read counters are logical artifact reads, including cache hits.
 Expert formats other than f32 and MoE adapters/training remain refused pending
 their own qualification. `tests/architecture_moe_real.rs` is the explicit
 large-model gate; adding primitives alone does not close the plan's I9 phase.
+Its pinned Qwen2-57B-A14B-Instruct row has completed a streamed-expert ask on
+an 8 GB RTX 4060 Laptop GPU with sixteen exact independent reference tokens.
+Its weights occupy 229,634,635,776 bytes when expanded to f32. The
+[first-ask receipt](../../../support/receipts/resident_inference_architecture_first_ask.json)
+records timing, selected reads and the observed process memory peak. The full
+fixture's second question and checkpoint/provider-reload qualification are
+still running; this is one physical computer's library-backed provider row.
 
 Explicit weight formats use `esp.layer-weights/v2`. Add a seventh import
 argument, `f16`, `bf16`, `q8-block32` or `q4-block32`, after the streaming
