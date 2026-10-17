@@ -105,6 +105,10 @@ adds both exact 57B answers and serialized checkpoint/provider reload, trained
 Mistral 7B CPU/GPU rows with natural EOS and checkpoint parity, final small-Qwen
 rows and resident consumer regressions. All use one physical computer; the
 plan keeps the largest model in each family and further architectures open.
+The [main integration receipt](../../../support/receipts/resident_inference_architecture_integration.json)
+records the fresh release build, native CPU/GPU consumer checks, and the full
+Djinn suite after the later upstream intake. Earlier model receipts bind the
+unchanged inference source; the remaining I9 scale and family gates stay open.
 
 Explicit weight formats use `esp.layer-weights/v2`. Add a seventh import
 argument, `f16`, `bf16`, `q8-block32` or `q4-block32`, after the streaming
