@@ -9,7 +9,9 @@
 use super::decoder::WeightFormat;
 use super::decoder::streaming::LayerSource;
 use super::decoder::{DecoderDevice, DecoderProvider};
-use super::layer_library::{FormattedLayerWeightIndex, LayerArtifact, LayerWeightIndex};
+use super::layer_library::{
+    ExpertWeightIndex, FormattedLayerWeightIndex, LayerArtifact, LayerWeightIndex,
+};
 use super::prompt::{PromptTemplate, SessionProvider};
 use super::{BoundModelSession, InferError, ModelSession};
 use eidetic::typed::{TypedPayload, load_typed};
@@ -59,6 +61,7 @@ pub struct ResolvedInferenceRow {
     template_bytes: Vec<u8>,
     layered: Option<LayerWeightIndex>,
     formatted: Option<FormattedLayerWeightIndex>,
+    experts: Option<ExpertWeightIndex>,
 }
 
 /// Resolve and validate the row and template without constructing a device.
@@ -131,7 +134,24 @@ async fn resolve_library_row(
     } else {
         None
     };
-    let layered = if let Some(index) = &formatted {
+    let experts = if weight_manifest.schema == ExpertWeightIndex::schema_ref() {
+        if weight_manifest.id != model_manifest.weight_blob
+            || weight_manifest.content_hash != model_manifest.weight_blob.0
+        {
+            return Err(failure("expert index identity mismatch"));
+        }
+        Some(
+            load_typed::<ExpertWeightIndex>(store, &mut NoFetcher, model_manifest.weight_blob)
+                .await
+                .map_err(failure)?
+                .ok_or_else(|| failure("expert index missing"))?,
+        )
+    } else {
+        None
+    };
+    let layered = if let Some(index) = &experts {
+        Some(index.weights.clone())
+    } else if let Some(index) = &formatted {
         Some(index.weights.clone())
     } else if weight_manifest.schema == LayerWeightIndex::schema_ref() {
         if weight_manifest.id != model_manifest.weight_blob
@@ -157,6 +177,27 @@ async fn resolve_library_row(
         )?;
         if index.layers.len() != config.num_hidden_layers {
             return Err(failure("layer count disagrees with config"));
+        }
+        match (&config.moe, &experts) {
+            (Some(moe), Some(experts))
+                if experts.experts.len() == config.num_hidden_layers
+                    && experts.experts.iter().enumerate().all(|(i, bank)| {
+                        bank.len()
+                            == if config.layer_is_moe(i) {
+                                moe.num_experts
+                            } else {
+                                0
+                            }
+                    }) =>
+            {
+                ()
+            },
+            (None, None) => (),
+            _ => {
+                return Err(failure(
+                    "expert index dimensions disagree with decoder config",
+                ));
+            },
         }
     }
     let resolved = if let Some(index) = &layered {
@@ -194,6 +235,7 @@ async fn resolve_library_row(
         template_bytes,
         layered,
         formatted,
+        experts,
     })
 }
 
@@ -248,8 +290,43 @@ impl ResolvedInferenceRow {
         self.layered.as_ref().map(|index| index.layers.clone())
     }
 
+    /// The owner supplies the store borrow, while this row supplies exact
+    /// artifact identities and bounds. No store lock spans tensor execution.
+    pub fn artifact_source<R>(&self, reader: R) -> Option<std::sync::Arc<dyn LayerSource>>
+    where
+        R: Fn(&LayerArtifact, usize) -> Result<Vec<u8>, InferError> + Send + Sync + 'static,
+    {
+        use std::sync::Arc;
+        let layers = self.layer_artifacts()?;
+        let experts = self.experts.as_ref().map(|index| index.experts.clone());
+        let reader = Arc::new(reader);
+        let layer_reader = reader.clone();
+        Some(Arc::new(super::decoder::streaming::with_expert_reader(
+            move |index: usize, limit: usize| {
+                layer_reader(
+                    layers
+                        .get(index)
+                        .ok_or_else(|| failure("layer outside index"))?,
+                    limit,
+                )
+            },
+            move |layer: usize, expert: usize, limit: usize| {
+                reader(
+                    experts
+                        .as_ref()
+                        .and_then(|bank| bank.get(layer))
+                        .and_then(|bank| bank.get(expert))
+                        .ok_or_else(|| failure("expert outside index"))?,
+                    limit,
+                )
+            },
+        )))
+    }
+
     fn execution_loader(&self, loader: &str) -> String {
-        if let Some(index) = &self.formatted {
+        if self.experts.is_some() {
+            format!("{loader}/expert-stream-v1/f32")
+        } else if let Some(index) = &self.formatted {
             format!("{loader}/layer-stream-v2/{}", index.format.id())
         } else if self.layered.is_some() {
             format!("{loader}/layer-stream-v1")
@@ -391,6 +468,16 @@ impl ResolvedInferenceRow {
             let tensors =
                 safetensors::SafeTensors::deserialize(&self.model.components.weight_bytes)
                     .map_err(failure)?;
+            if self.experts.is_some() {
+                let config = self.decoder_config()?;
+                let shared = super::decoder::loader::load_shared_shards(
+                    &config,
+                    &tensors,
+                    device,
+                    index.options.max_layer_bytes,
+                )?;
+                return stage.with_output_shards(shared);
+            }
             let shared = super::decoder::loader::load_decoder_shared_tensors_with_format(
                 &super::decoder::DecoderConfig::from_json_bytes(
                     &self.model.components.config_bytes,
@@ -441,7 +528,8 @@ impl ResolvedInferenceRow {
                 device,
             )?
         }
-        .with_literal_prompt();
+        .with_literal_prompt()
+        .with_template_eos(&PromptTemplate::from_bytes(&self.template_bytes)?.eos);
         let provider = if resident {
             provider.with_resident_layers()?
         } else {

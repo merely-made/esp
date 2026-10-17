@@ -205,9 +205,9 @@ fn detach_base(mut loaded: LoadedDecoder) -> LoadedDecoder {
         layer.v_w = layer.v_w.clone().detach();
         layer.o_w = layer.o_w.clone().detach();
         layer.post_norm_gamma = layer.post_norm_gamma.clone().detach();
-        layer.gate_w = layer.gate_w.clone().detach();
-        layer.up_w = layer.up_w.clone().detach();
-        layer.down_w = layer.down_w.clone().detach();
+        if let super::moe::LoadedMlp::Dense(weights) = &mut layer.mlp {
+            weights.detach();
+        }
     }
     loaded
 }
@@ -308,6 +308,9 @@ pub fn train_peft_lora_autodiff_controlled(
         ));
     }
     let config = DecoderConfig::from_json_bytes(config_bytes)?;
+    if config.moe.is_some() {
+        return Err(InferError::Unsupported { feature: "MoE adapters/training".into(), detail: "expert routing is inference-only; a differentiable routing path needs separate qualification".into() });
+    }
     for module in &settings.target_modules {
         dimensions(&config, module)?;
     }

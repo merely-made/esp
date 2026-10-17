@@ -250,6 +250,9 @@ pub fn train_peft_lora_controlled(
         ));
     }
     let config = DecoderConfig::from_json_bytes(config_bytes)?;
+    if config.moe.is_some() {
+        return Err(InferError::Unsupported { feature: "MoE adapters/training".into(), detail: "expert routing is inference-only; a differentiable routing path needs separate qualification".into() });
+    }
     let (in_features, out_features) = dimensions(&config, &settings.target_module)?;
     let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
         .map_err(|error| InferError::InvalidConfig(format!("tokenizer.json parse: {error}")))?;

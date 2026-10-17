@@ -17,6 +17,20 @@ const SCHEMA: &[u8] = br#"{"format":"mere-native","schema_id":"esp.layer-weights
 
 const FORMAT_SCHEMA: &[u8] = br#"{"format":"mere-native","schema_id":"esp.layer-weights/v2","body":{"version":2,"description":"Explicit execution format and measured qualification over exact layer artifacts.","additional_properties":false}}"#;
 
+const EXPERT_SCHEMA: &[u8] = br#"{"format":"mere-native","schema_id":"esp.expert-weights/v1","body":{"version":1,"description":"Exact core layers and independently verified routed-expert artifacts; dense layers have empty expert lists.","required":["weights","experts"],"additional_properties":false}}"#;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpertWeightIndex {
+    pub weights: LayerWeightIndex,
+    pub experts: Vec<Vec<LayerArtifact>>,
+}
+impl TypedPayload for ExpertWeightIndex {
+    fn schema_ref() -> SchemaRef {
+        SchemaRef::from_id(ManifestId::of_blob(EXPERT_SCHEMA))
+    }
+}
+
 /// The bf16 comparison uses the exact rendered prompts recorded here. Logit
 /// metrics describe the next token; generated ids expose later divergence.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -205,6 +219,9 @@ async fn import_layers(
     options.validate()?;
     let config_bytes = std::fs::read(directory.join("config.json")).map_err(failure)?;
     let config = super::decoder::DecoderConfig::from_json_bytes(&config_bytes)?;
+    if config.moe.is_some() && format.is_some() {
+        return Err(InferError::Unsupported{feature:"formatted MoE import".into(),detail:"expert formats require separate measured qualification; import the source row for f32 execution".into()});
+    }
     let config_json: serde_json::Value = serde_json::from_slice(&config_bytes).map_err(failure)?;
     let mut reader = super::decoder::checkpoint::CheckpointReader::open(directory, &config)?;
     let mut source_artifacts = Vec::new();
@@ -228,6 +245,7 @@ async fn import_layers(
     )
     .await?;
     let mut layers = Vec::new();
+    let mut experts = Vec::new();
     for index in 0..config.num_hidden_layers {
         layers.push(
             save_artifact(
@@ -239,6 +257,19 @@ async fn import_layers(
             )
             .await?,
         );
+        let mut bank = Vec::new();
+        if config.layer_is_moe(index) {
+            for expert in 0..config.moe.as_ref().unwrap().num_experts {
+                bank.push(
+                    save_artifact(
+                        store,
+                        reader.expert_bytes(index, expert, options.max_layer_bytes)?,
+                    )
+                    .await?,
+                );
+            }
+        }
+        experts.push(bank);
     }
     let weights = LayerWeightIndex {
         shared,
@@ -258,6 +289,9 @@ async fn import_layers(
             )
             .await?
         },
+        None if config.moe.is_some() => {
+            save(store, &ExpertWeightIndex { weights, experts }).await?
+        },
         None => save(store, &weights).await?,
     };
     let tokenizer_blob = save(
@@ -271,7 +305,7 @@ async fn import_layers(
         store,
         &eidetic::ModelManifest {
             model_id: model_id.into(),
-            architecture: "llama".into(),
+            architecture: config.model_type.clone().unwrap_or_else(|| "llama".into()),
             license: Some(license.into()),
             config: config_json,
             weight_blob,
