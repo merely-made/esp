@@ -100,6 +100,11 @@ records timing, selected reads and the observed process memory peak for that
 first ask. The plan records further answers, checkpoint/provider-reload and
 consumer checks separately; this receipt covers one physical computer's
 library-backed provider row.
+The [bounded I9 qualification receipt](../../../support/receipts/resident_inference_architecture_qualification.json)
+adds both exact 57B answers and serialized checkpoint/provider reload, trained
+Mistral 7B CPU/GPU rows with natural EOS and checkpoint parity, final small-Qwen
+rows and resident consumer regressions. All use one physical computer; the
+plan keeps the largest model in each family and further architectures open.
 
 Explicit weight formats use `esp.layer-weights/v2`. Add a seventh import
 argument, `f16`, `bf16`, `q8-block32` or `q4-block32`, after the streaming
