@@ -13,6 +13,7 @@ use eidetic::{
     ManifestId,
     typed::{TypedPayload, save_typed},
 };
+use esp::infer::decoder::stage::{DecoderStage, StageExecutor, StageHidden};
 use esp::infer::decoder::{DecoderDevice, streaming::StreamingOptions};
 use esp::infer::layer_library::import_layered_model;
 use esp::infer::library::{InferenceModelRow, resolve_library_session};
@@ -24,6 +25,27 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+
+#[derive(Debug)]
+struct SessionStage {
+    stage: DecoderStage,
+    session: String,
+}
+impl StageExecutor for SessionStage {
+    fn session_id(&self) -> Option<&str> {
+        Some(&self.session)
+    }
+    fn returns_logits(&self) -> bool {
+        self.stage.returns_logits()
+    }
+    fn forward(
+        &self,
+        hidden: StageHidden,
+        start: usize,
+    ) -> Result<StageHidden, esp::infer::InferError> {
+        self.stage.forward(hidden, start)
+    }
+}
 
 fn save<T: TypedPayload>(store: &mut dyn eidetic::Store, value: &T) -> ManifestId {
     pollster::block_on(save_typed(
@@ -347,7 +369,15 @@ fn expert_library_identity_and_read_failures_are_enforced() {
         )
         .unwrap();
     let provider = resolved
-        .load_with_stages(&device, "burn-flex", 4, Box::new(stage))
+        .load_with_stages(
+            &device,
+            "burn-flex",
+            4,
+            Box::new(SessionStage {
+                stage,
+                session: resolved.session("burn-flex").id().unwrap().to_string(),
+            }),
+        )
         .unwrap();
     assert_eq!(provider.session_identity(), session);
     assert_eq!(
