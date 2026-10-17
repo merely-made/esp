@@ -72,15 +72,21 @@ pub fn layer_resident_bytes(
                 detail: "only f32 expert execution is qualified".into(),
             });
         }
-        // Conservative for hybrid models: reserve a complete expert bank in
-        // each layer. An admitted resident stage must hold every routed expert.
-        h.saturating_mul(3)
+        // Reserve the complete bank, and the larger dense MLP for a hybrid
+        // configuration when its dense width exceeds that bank.
+        let bank = h
+            .saturating_mul(3)
             .saturating_mul(
                 (moe.num_experts as u128)
                     .saturating_mul(moe.moe_intermediate_size as u128)
                     .saturating_add(moe.shared_expert_intermediate_size as u128),
             )
-            .saturating_add(h.saturating_mul(moe.num_experts as u128 + 1))
+            .saturating_add(h.saturating_mul(moe.num_experts as u128 + 1));
+        if (0..config.num_hidden_layers).any(|index| !config.layer_is_moe(index)) {
+            bank.max(h.saturating_mul(inter).saturating_mul(3))
+        } else {
+            bank
+        }
     } else {
         h.saturating_mul(inter).saturating_mul(3)
     };
@@ -656,4 +662,21 @@ mod tests {
         bytes[..8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(decode_hidden(&bytes, 8, usize::MAX, WeightFormat::F32, &device).is_err());
     }
+}
+#[test]
+fn hybrid_admission_covers_a_dense_mlp_larger_than_the_expert_bank() {
+    let mut dense = tiny_config();
+    dense.intermediate_size = 4096;
+    let baseline = layer_resident_bytes(&dense, WeightFormat::F32).unwrap();
+    let mut hybrid = dense;
+    hybrid.moe = Some(super::super::config::MoeConfig {
+        num_experts: 1,
+        num_experts_per_tok: 1,
+        moe_intermediate_size: 1,
+        shared_expert_intermediate_size: 1,
+        norm_topk_prob: false,
+        decoder_sparse_step: 2,
+        mlp_only_layers: vec![],
+    });
+    assert!(layer_resident_bytes(&hybrid, WeightFormat::F32).unwrap() >= baseline);
 }

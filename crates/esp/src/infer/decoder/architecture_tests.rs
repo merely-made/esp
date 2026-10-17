@@ -255,8 +255,17 @@ fn qwen2_moe_normalized_routes_and_hybrid_layers_reference() {
 #[cfg(feature = "decoder-wgpu")]
 #[test]
 #[ignore = "requires a native discrete GPU"]
-fn gpu_expert_routing_streaming_and_stages_match_reference() {
-    for name in ["qwen2_moe", "qwen2_moe_normalized"] {
+fn gpu_architecture_streaming_and_stages_match_reference() {
+    for name in [
+        "llama",
+        "llama3",
+        "linear",
+        "mistral",
+        "qwen2",
+        "qwen3",
+        "qwen2_moe",
+        "qwen2_moe_normalized",
+    ] {
         check_on(name, Device::wgpu(DecoderGpuKind::DiscreteGpu(0)));
     }
 }
