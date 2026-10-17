@@ -139,3 +139,10 @@ for the precise compile, execution, and headed-browser boundaries.
 The historical Vates and Sibylla documents are retained under `design_docs/`
 with supersession notes. The `vates` and `sibylla` compatibility packages were
 removed on 2026-09-23; `esp` is the only package.
+
+Indexed decoder rows can retain all verified layers through
+`load_resident_with_layer_source` when a host admits the full runtime weight
+and declared context-KV payload. `resident_payload_bytes` excludes backend,
+RoPE, activation, artifact-transfer and allocator reserves. Resident placement
+retains the streamed row's format, session and query-chunk prefill arithmetic;
+placement changes are provenance rather than a new model session.

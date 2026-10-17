@@ -182,6 +182,11 @@ impl<'a> StreamObserver<'a> {
 }
 
 impl DecoderProvider {
+    /// Keep all verified indexed layers resident under host admission.
+    pub fn with_resident_layers(mut self) -> Result<Self, InferError> {
+        self.model = self.model.with_resident_layers()?;
+        Ok(self)
+    }
     /// Use a session-bound remote layer chain with this provider's ordinary
     /// embedding, output head, tokenizer and checkpoint generation loop.
     pub fn with_stages(
