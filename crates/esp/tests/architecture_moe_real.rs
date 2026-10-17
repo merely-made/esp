@@ -59,15 +59,14 @@ fn save<T: TypedPayload>(store: &mut dyn eidetic::Store, value: &T) -> ManifestI
 }
 
 #[test]
-#[ignore = "requires the pinned 115 GB Qwen2 MoE snapshot, independent reference, explicit work root and a discrete GPU"]
+#[ignore = "requires the pinned 115 GB Qwen2 MoE snapshot, explicit work root and a discrete GPU"]
 fn larger_than_ram_moe_completes_with_selected_expert_streaming() {
     let work = PathBuf::from(
         std::env::var_os("ESP_ARCHITECTURE_WORK_DIR").expect("explicit I9 work root"),
     );
     let source=PathBuf::from(std::env::var_os("USERPROFILE").unwrap()).join(".cache/huggingface/hub/models--Qwen--Qwen2-57B-A14B-Instruct/snapshots/50896d66b39f1425d63720541a66c7df13e053c0");
     let reference: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(work.join("qwen2-moe-reference.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(include_bytes!("qwen2_57b_moe_reference.json")).unwrap();
     assert_eq!(
         reference["revision"],
         "50896d66b39f1425d63720541a66c7df13e053c0"
