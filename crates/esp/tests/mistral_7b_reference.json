@@ -1,0 +1,85 @@
+{
+  "model_id": "mistralai/Mistral-7B-Instruct-v0.1",
+  "revision": "ec5deb64f2c6e6fa90c1abf74a91d5c93a9669ca",
+  "torch": "2.14.1+cpu",
+  "transformers": "4.57.6",
+  "dtype": "torch.float32",
+  "attention": "eager",
+  "max_tokens": 8,
+  "reference": "cached Transformers greedy tokens",
+  "official_template_match": true,
+  "template_sha256": "092c62dac3621a6f695108e5b74eb5377b6db67f3c395b28665d656bae5d0c0a",
+  "artifacts": {
+    "config.json": "cf25cdf4719f181d1d1d371973285d9afe9afde0d0c6a6fd48de857555ce1e0d",
+    "generation_config.json": "afcf2a1da583dbeb66bb367a759713901e23ce19ed83ed8f5a21b0e877addd5b",
+    "tokenizer.json": "11c08db21487c885d8c792180f0be237f6a261b89a46f128a6a80a3aa4bd1720",
+    "tokenizer_config.json": "475361439e5c012de9dffdedc416a66a50f1a29f7aa80b375ba014fb13d6bb8a",
+    "model.safetensors.index.json": "c94ab46aaf5fcca44720c10bcc498c1b0d9759d47534a396e3512edc451ebd06",
+    "model-00001-of-00002.safetensors": "a464228d9c9427bf035cfd5a2e18bf0494d7231bfacc478ec5fc9f57a612d051",
+    "model-00002-of-00002.safetensors": "5734c77cf2ff6482713d474ee9c8791cd712b59dd36b05d096af5a4cb41f3f02"
+  },
+  "rows": [
+    {
+      "question": "What is the capital of France?",
+      "prompt": "<s> [INST] What is the capital of France? [/INST]",
+      "prompt_ids": [
+        1,
+        733,
+        16289,
+        28793,
+        1824,
+        349,
+        272,
+        5565,
+        302,
+        4843,
+        28804,
+        733,
+        28748,
+        16289,
+        28793
+      ],
+      "token_ids": [
+        415,
+        5565,
+        302,
+        4843,
+        349,
+        5465,
+        28723
+      ],
+      "text": "The capital of France is Paris.",
+      "seconds": 131.89099999994505
+    },
+    {
+      "question": "What is two plus two?",
+      "prompt": "<s> [INST] What is two plus two? [/INST]",
+      "prompt_ids": [
+        1,
+        733,
+        16289,
+        28793,
+        1824,
+        349,
+        989,
+        3285,
+        989,
+        28804,
+        733,
+        28748,
+        16289,
+        28793
+      ],
+      "token_ids": [
+        6005,
+        3285,
+        989,
+        349,
+        2308,
+        28723
+      ],
+      "text": "Two plus two is four.",
+      "seconds": 113.73400000005495
+    }
+  ]
+}
