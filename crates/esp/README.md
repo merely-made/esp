@@ -22,7 +22,7 @@ Changing the orders changes the vector space, so callers must re-mint any
 derived `VectorIndex` under the same setting. The fixed-corpus receipt and cost
 numbers, including the real BM25/RRF integration probe and digest-pinned
 MiniLM CPU baseline, live in the
-[search surface wiring plan](../../../design_docs/mere_docs/implementation_strategy/2026-08-12_search_surface_wiring_plan.md).
+[search surface wiring plan](https://github.com/merely-made/mere/blob/main/design_docs/mere_docs/implementation_strategy/2026-08-12_search_surface_wiring_plan.md).
 
 ## Features
 
@@ -40,7 +40,7 @@ from a caller-owned Eidetic store without a network fetcher. `infer::prompt`
 renders strict `esp.prompt-template/v1` data and binds the exact artifact hash
 to the immutable model session. The local import example, pinned SmolLM2 row,
 independent-reference reproduction and resident qualification are recorded in
-the [resident inference plan](../../../design_docs/mere_docs/implementation_strategy/2026-10-15_resident_inference_and_recall_plan.md).
+the [resident inference plan](https://github.com/merely-made/mere/blob/main/design_docs/mere_docs/implementation_strategy/2026-10-15_resident_inference_and_recall_plan.md).
 
 Native imports can pass a sixth argument to `import_inference_model`, a JSON
 file with `query_chunk`, `max_layer_bytes` and `max_shared_bytes`. For example:
@@ -95,17 +95,17 @@ large-model gate; adding primitives alone does not close the plan's I9 phase.
 Its pinned Qwen2-57B-A14B-Instruct row has completed a streamed-expert ask on
 an 8 GB RTX 4060 Laptop GPU with sixteen exact independent reference tokens.
 Its weights occupy 229,634,635,776 bytes when expanded to f32. The
-[first-ask receipt](../../../support/receipts/resident_inference_architecture_first_ask.json)
+[first-ask receipt](https://github.com/merely-made/mere/blob/main/support/receipts/resident_inference_architecture_first_ask.json)
 records timing, selected reads and the observed process memory peak for that
 first ask. The plan records further answers, checkpoint/provider-reload and
 consumer checks separately; this receipt covers one physical computer's
 library-backed provider row.
-The [bounded I9 qualification receipt](../../../support/receipts/resident_inference_architecture_qualification.json)
+The [bounded I9 qualification receipt](https://github.com/merely-made/mere/blob/main/support/receipts/resident_inference_architecture_qualification.json)
 adds both exact 57B answers and serialized checkpoint/provider reload, trained
 Mistral 7B CPU/GPU rows with natural EOS and checkpoint parity, final small-Qwen
 rows and resident consumer regressions. All use one physical computer; the
 plan keeps the largest model in each family and further architectures open.
-The [main integration receipt](../../../support/receipts/resident_inference_architecture_integration.json)
+The [main integration receipt](https://github.com/merely-made/mere/blob/main/support/receipts/resident_inference_architecture_integration.json)
 records the fresh release build, native CPU/GPU consumer checks, and the full
 Djinn suite after the later upstream intake. Earlier model receipts bind the
 unchanged inference source; the remaining I9 scale and family gates stay open.
@@ -174,7 +174,7 @@ and the independent greedy reference; browser durable execution is unqualified.
 
 The `actor` feature compiles for wasm, but its Armillary thread actor requires
 a host executor at runtime. See the
-[feature and target matrix](design_docs/2026-08-09_feature_target_matrix.md)
+[feature and target matrix](https://github.com/merely-made/esp/blob/main/crates/esp/design_docs/2026-08-09_feature_target_matrix.md)
 for the precise compile, execution, and headed-browser boundaries.
 
 The historical Vates and Sibylla documents are retained under `design_docs/`
