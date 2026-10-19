@@ -3,94 +3,204 @@ rust-version = "1.97.1"
 name = "esp"
 version = "0.1.0"
 edition = "2024"
-license.workspace = true
 description = "Portable inference and embedding seams for local, browser, and remote model execution."
-repository = "https://github.com/merely-made/mere"
+repository = "https://github.com/merely-made/esp"
 readme = "README.md"
-keywords = ["inference", "embeddings", "local", "webgpu", "retrieval"]
-categories = ["science", "api-bindings", "data-structures"]
+keywords = [
+    "inference",
+    "embeddings",
+    "local",
+    "webgpu",
+    "retrieval",
+]
+categories = [
+    "science",
+    "api-bindings",
+    "data-structures",
+]
+
+[package.license]
+workspace = true
 
 [dependencies]
 zeroize = "1"
-serde = { version = "1", features = ["derive"] }
 
-# Typed-payload persistence for `embed::VectorIndex` (2026-08-12 eidetic
-# reorg). Optional, so the default tree stays serde/zeroize-only and portable: a
-# consumer that only computes embeddings never links the store.
-eidetic = { path = "../../eidetic/eidetic-core", version = "0.0.2", optional = true }
+[dependencies.serde]
+version = "1"
+features = [
+    "derive",
+]
 
-# Inference actor. Optional so the default seam remains thread-free.
-armillary = { path = "../../armillary", version = "0.1.0", optional = true }
+[dependencies.eidetic]
+workspace = true
+optional = true
 
-# Shared model tree. NdArray is the portable baseline; the `-wgpu` features add
-# Burn's WebGPU backend without changing the model bodies.
-burn = { version = "=0.22.0", default-features = false, features = ["ndarray", "std"], optional = true }
-tracing = { version = "0.1", optional = true }
-serde_json = { version = "1.0", optional = true }
-safetensors = { version = "0.4", optional = true }
-half = { version = "2", optional = true }
+[dependencies.armillary]
+workspace = true
+optional = true
 
-# The adapter probe behind `decoder-wgpu` (`infer::decoder::gpu_probe`). This
-# is the SAME wgpu the burn stack reaches through cubecl-wgpu — the workspace
-# carries exactly one, 30.0.1 — which is what makes the probe's answer an
-# answer about the adapter cubecl would really bind rather than about a
-# parallel enumeration. `pollster` because `Instance::enumerate_adapters` is a
-# future that is already resolved on native, and cubecl blocks on it too.
-wgpu = { workspace = true, optional = true }
-pollster = { version = "0.4", optional = true }
+[dependencies.burn]
+version = "=0.22.0"
+default-features = false
+features = [
+    "ndarray",
+    "std",
+]
+optional = true
 
-# Tokenizers uses native Oniguruma on native targets and the pure-Rust regex
-# path on wasm. The dependency name is shared so `dep:tokenizers` activates the
-# appropriate target realization.
-[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
-tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+[dependencies.tracing]
+version = "0.1"
+optional = true
 
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
-tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"], optional = true }
-# Burn's tree reaches getrandom 0.4 even through the NdArray configurations;
-# wasm therefore needs the JS backend selected by every ESP Burn feature.
-getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
+[dependencies.serde_json]
+version = "1.0"
+optional = true
+
+[dependencies.safetensors]
+version = "0.4"
+optional = true
+
+[dependencies.half]
+version = "2"
+optional = true
+
+[dependencies.wgpu]
+workspace = true
+optional = true
+
+[dependencies.pollster]
+version = "0.4"
+optional = true
+
+[target."cfg(not(all(target_family = \"wasm\", target_os = \"unknown\")))".dependencies.tokenizers]
+version = "0.20"
+default-features = false
+features = [
+    "onig",
+]
+optional = true
+
+[target."cfg(all(target_family = \"wasm\", target_os = \"unknown\"))".dependencies.tokenizers]
+version = "0.20"
+default-features = false
+features = [
+    "unstable_wasm",
+]
+optional = true
+
+[target."cfg(all(target_family = \"wasm\", target_os = \"unknown\"))".dependencies.getrandom]
+version = "0.4"
+features = [
+    "wasm_js",
+]
+optional = true
 
 [dev-dependencies]
 serde_json = "1"
 pollster = "0.4"
 async-trait = "0.1"
-eidetic = { path = "../../eidetic/eidetic-core", version = "0.0.2" }
-eidetic-search = { workspace = true }
-muniment = { path = "../../eidetic/muniment", version = "0.1.1", features = ["redb"] }
-sha2 = { workspace = true }
 tempfile = "3"
+
+[dev-dependencies.eidetic]
+workspace = true
+
+[dev-dependencies.muniment]
+workspace = true
+features = [
+    "redb",
+]
+
+[dev-dependencies.sha2]
+workspace = true
 
 [features]
 default = []
-
-# esp::infer
-actor = ["dep:armillary"]
-decoder = ["dep:burn", "dep:serde_json", "dep:safetensors", "dep:half", "dep:tokenizers", "dep:tracing", "dep:getrandom"]
-decoder-flex = ["decoder", "burn/flex"]
-
-decoder-wgpu = ["decoder", "burn/wgpu", "dep:wgpu", "dep:pollster"]
-decoder-lora = ["decoder", "model-session"]
-# The autodiff LoRA trainer (v1). `burn/optim` already implies `burn/autodiff`
-# in burn 0.22.0 (`optim = ["burn-optim", "autodiff"]`); `burn/autodiff`
-# is named here anyway because the trainer's gradients are the contract and a
-# future burn that decouples the two must not silently drop them.
-decoder-autodiff = ["decoder-lora", "burn/autodiff", "burn/optim"]
-
-# esp::embed
-# Save/load a VectorIndex through eidetic's typed-payload API.
-persistence = ["dep:eidetic"]
-model-session = ["persistence", "dep:serde_json"]
-index-burn = ["dep:burn", "dep:getrandom"]
-index-burn-wgpu = ["index-burn", "burn/wgpu"]
-bert = ["dep:burn", "dep:tokenizers", "dep:safetensors", "dep:serde_json", "dep:half", "dep:getrandom"]
-bert-wgpu = ["bert", "burn/wgpu"]
-bert-validation = ["bert"]
+actor = [
+    "dep:armillary",
+]
+decoder = [
+    "dep:burn",
+    "dep:serde_json",
+    "dep:safetensors",
+    "dep:half",
+    "dep:tokenizers",
+    "dep:tracing",
+    "dep:getrandom",
+]
+decoder-flex = [
+    "decoder",
+    "burn/flex",
+]
+decoder-wgpu = [
+    "decoder",
+    "burn/wgpu",
+    "dep:wgpu",
+    "dep:pollster",
+]
+decoder-lora = [
+    "decoder",
+    "model-session",
+]
+decoder-autodiff = [
+    "decoder-lora",
+    "burn/autodiff",
+    "burn/optim",
+]
+persistence = [
+    "dep:eidetic",
+]
+model-session = [
+    "persistence",
+    "dep:serde_json",
+]
+index-burn = [
+    "dep:burn",
+    "dep:getrandom",
+]
+index-burn-wgpu = [
+    "index-burn",
+    "burn/wgpu",
+]
+bert = [
+    "dep:burn",
+    "dep:tokenizers",
+    "dep:safetensors",
+    "dep:serde_json",
+    "dep:half",
+    "dep:getrandom",
+]
+bert-wgpu = [
+    "bert",
+    "burn/wgpu",
+]
+bert-validation = [
+    "bert",
+]
 
 [[example]]
 name = "import_inference_model"
-required-features = ["decoder", "model-session"]
+required-features = [
+    "decoder",
+    "model-session",
+]
 
 [[example]]
 name = "qualify_inference_model"
-required-features = ["decoder", "model-session"]
+required-features = [
+    "decoder",
+    "model-session",
+]
+
+[[test]]
+name = "library_session"
+required-features = [
+    "decoder",
+    "model-session",
+]
+
+[[test]]
+name = "smollm2_library"
+required-features = [
+    "decoder",
+    "model-session",
+]

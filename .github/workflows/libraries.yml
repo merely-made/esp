@@ -1,0 +1,11 @@
+name: Library gates
+on: [push, pull_request]
+jobs:
+  libraries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - run: cargo test --workspace --locked
+      - run: cargo check --workspace --no-default-features --locked
+      - run: cargo test --workspace --features actor,persistence,decoder,model-session --locked
