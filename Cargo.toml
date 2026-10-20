@@ -21,7 +21,7 @@ sha2 = "0.11"
 [workspace.dependencies.eidetic]
 version = "0.0.2"
 git = "https://github.com/merely-made/eidetic.git"
-rev = "543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
+rev = "738ef15956a29a125820b2d6c2280d39a6214f8e"
 
 [workspace.dependencies.armillary]
 version = "0.1.0"
@@ -31,7 +31,7 @@ rev = "e67c5def1c735be047492a867bcdc8b41fba22b8"
 [workspace.dependencies.muniment]
 version = "0.1.1"
 git = "https://github.com/merely-made/eidetic.git"
-rev = "543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
+rev = "738ef15956a29a125820b2d6c2280d39a6214f8e"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
@@ -44,4 +44,4 @@ path = "crates/esp"
 
 [patch.crates-io.muniment]
 git = "https://github.com/merely-made/eidetic.git"
-rev = "543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
+rev = "738ef15956a29a125820b2d6c2280d39a6214f8e"
