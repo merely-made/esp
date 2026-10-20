@@ -205,7 +205,7 @@ dependencies = [
 [[package]]
 name = "armillary"
 version = "0.1.1"
-source = "git+https://github.com/merely-made/armillary.git?rev=5d8754dc2a00be02d82b075441ac9ea44aa4f135#5d8754dc2a00be02d82b075441ac9ea44aa4f135"
+source = "git+https://github.com/merely-made/armillary.git?rev=e67c5def1c735be047492a867bcdc8b41fba22b8#e67c5def1c735be047492a867bcdc8b41fba22b8"
 dependencies = [
  "tracing",
 ]
