@@ -96,6 +96,7 @@ features = [
 optional = true
 
 [dev-dependencies]
+esp-test-support = { path = "../esp-test-support" }
 serde_json = "1"
 pollster = "0.4"
 async-trait = "0.1"
