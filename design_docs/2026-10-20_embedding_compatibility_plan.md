@@ -1,6 +1,6 @@
 # Provider-bound embedding persistence
 
-**Status (2026-10-20):** in progress. Retained contract:
+**Status (2026-10-20):** landed; resident receiving gate qualified. Retained contract:
 `eidetic/design_docs/eidetic_docs/implementation_strategy/2026-10-11_eidetic_development_plan.md`,
 P4 and the October 20 envelope continuation. Resident gate: Mere's
 `2026-10-15_resident_inference_and_recall_plan.md`, I10. These own policy and the
@@ -53,3 +53,15 @@ cross-family acceptance; this document records ESP's API and implementation.
   validation and refusing a saved sparse representation when the provider lacks
   that capability. The resident also checks the stored representation against
   its dense-dimension ceiling, independently of provider capability.
+
+- 2026-10-20: all three implementation done-conditions are qualified. The final
+  embedding sweep passes 147 cases with two explicit model/reference helpers
+  ignored; the separate real MiniLM identity helper passes. Mere's resident
+  receipt proves three independent native processes, exact matching cold
+  projection/passage reuse over retained sources after origin removal, and
+  four incompatible-cache refusals. It records the fixed lexical/vector/fused
+  measurements and actual vector allocation/persisted-byte budgets. Canonical
+  cross-family evidence and limits live once in
+  `mere/support/receipts/resident-embedding-20261020/qualification.json` and the
+  resident inference plan, I10. Whole P4, headed UI and second-device gates
+  remain separately scoped.
