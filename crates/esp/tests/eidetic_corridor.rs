@@ -34,8 +34,7 @@ use muniment::MemoryBackend as InMemoryStore;
 
 // ── Tiny synthetic artifacts (mirrors decoder::loader's test fixtures) ──────
 
-#[path = "support/decoder.rs"]
-mod fixture;
+use esp_test_support::decoder as fixture;
 use fixture::{CONFIG_JSON, tokenizer_json, weights_bytes};
 
 #[test]

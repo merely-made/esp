@@ -4,8 +4,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // SPDX-License-Identifier: MPL-2.0
 
-#[path = "support/decoder.rs"]
-mod fixture;
+use esp_test_support::decoder as fixture;
 
 use eidetic::typed::{TypedPayload, save_typed};
 use eidetic::{

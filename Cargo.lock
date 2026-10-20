@@ -2734,6 +2734,7 @@ dependencies = [
  "async-trait",
  "burn",
  "eidetic",
+ "esp-test-support",
  "getrandom 0.4.3",
  "half",
  "muniment",
@@ -2747,6 +2748,14 @@ dependencies = [
  "tracing",
  "wgpu",
  "zeroize",
+]
+
+[[package]]
+name = "esp-test-support"
+version = "0.1.0"
+dependencies = [
+ "safetensors 0.4.5",
+ "serde_json",
 ]
 
 [[package]]

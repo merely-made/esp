@@ -1,0 +1,14 @@
+[package]
+name = "esp-test-support"
+version = "0.1.0"
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Supplier-owned tiny decoder fixtures for ESP integration tests"
+
+[dependencies]
+safetensors = "0.4"
+
+[dev-dependencies]
+serde_json = "1"

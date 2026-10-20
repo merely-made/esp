@@ -5,10 +5,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #![cfg(feature = "decoder")]
-#[path = "support/decoder.rs"]
-mod fixture;
 use esp::infer::decoder::{DecoderDevice, DecoderProvider};
 use esp::infer::{GenerationRequest, InferenceProvider};
+use esp_test_support::decoder as fixture;
 use std::cell::Cell;
 fn provider() -> DecoderProvider {
     DecoderProvider::from_bytes(

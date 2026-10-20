@@ -24,6 +24,9 @@ numbers, including the real BM25/RRF integration probe and digest-pinned
 MiniLM CPU baseline, live in the
 [search surface wiring plan](https://github.com/merely-made/mere/blob/main/design_docs/mere_docs/implementation_strategy/2026-08-12_search_surface_wiring_plan.md).
 
+Downstream integration tests can depend on `esp-test-support` for supplier-owned
+tiny decoder fixtures and templates without repinning the ESP runtime package.
+
 ## Features
 
 | Namespace | CPU | WGPU | Other |
