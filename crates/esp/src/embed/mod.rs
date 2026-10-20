@@ -36,6 +36,8 @@
 //! The generation half of the crate is [`crate::infer`].
 
 pub mod affinity;
+#[cfg(feature = "persistence")]
+pub mod compatible;
 #[cfg(feature = "bert")]
 pub mod bert;
 pub mod index;

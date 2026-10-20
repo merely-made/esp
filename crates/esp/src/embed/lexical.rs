@@ -188,7 +188,6 @@ impl LexicalEmbeddingProvider {
         sparse
     }
 
-
     /// Measure what hashing does to a corpus at this provider's dimension.
     ///
     /// Walks the same tokenization and the same n-gram orders `embed` uses and
@@ -233,6 +232,42 @@ impl LexicalEmbeddingProvider {
 }
 
 impl EmbeddingProvider for LexicalEmbeddingProvider {
+    #[cfg(feature = "persistence")]
+    fn compatibility_space(&self) -> Option<eidetic::models::embedding::EmbeddingSpaceV1> {
+        use eidetic::models::embedding::*;
+        let component = |name: &str| EmbeddingComponentV1 {
+            name: name.into(),
+            revision: "v1".into(),
+            parameters: Default::default(),
+            artifacts: Default::default(),
+        };
+        let mut producer = component("esp.signed-fnv1a64-token-ngram");
+        producer.parameters.insert(
+            "orders".into(),
+            self.token_ngram_orders
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let mut tokenizer = component("rust.unicode-alphanumeric-lowercase");
+        tokenizer.parameters.insert(
+            "unicode".into(),
+            format!("{:?}", std::char::UNICODE_VERSION),
+        );
+        Some(EmbeddingSpaceV1 {
+            producer,
+            tokenizer,
+            preprocessing: component("identity"),
+            pooling: "signed-feature-sum".into(),
+            query_prefix: "".into(),
+            document_prefix: "".into(),
+            normalization: "l2-f32".into(),
+            dimensions: self.dimensions,
+            metric: EmbeddingMetric::Cosine,
+        })
+    }
+
     fn dimensions(&self) -> usize {
         self.dimensions
     }
