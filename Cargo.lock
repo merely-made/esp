@@ -1228,7 +1228,7 @@ dependencies = [
 [[package]]
 name = "chartulary"
 version = "0.2.2"
-source = "git+https://github.com/merely-made/eidetic.git?rev=de6b1dce75dd6725d72c79b829e4878c7903a381#de6b1dce75dd6725d72c79b829e4878c7903a381"
+source = "git+https://github.com/merely-made/eidetic.git?rev=543f5ff38f87a09afc04dbc59f57c2dfbc6a9943#543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
 dependencies = [
  "muniment",
  "petgraph",
@@ -2555,7 +2555,7 @@ dependencies = [
 [[package]]
 name = "eidetic"
 version = "0.0.2"
-source = "git+https://github.com/merely-made/eidetic.git?rev=de6b1dce75dd6725d72c79b829e4878c7903a381#de6b1dce75dd6725d72c79b829e4878c7903a381"
+source = "git+https://github.com/merely-made/eidetic.git?rev=543f5ff38f87a09afc04dbc59f57c2dfbc6a9943#543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
 dependencies = [
  "async-trait",
  "blake3",
@@ -4282,7 +4282,7 @@ dependencies = [
 [[package]]
 name = "muniment"
 version = "0.1.2"
-source = "git+https://github.com/merely-made/eidetic.git?rev=de6b1dce75dd6725d72c79b829e4878c7903a381#de6b1dce75dd6725d72c79b829e4878c7903a381"
+source = "git+https://github.com/merely-made/eidetic.git?rev=543f5ff38f87a09afc04dbc59f57c2dfbc6a9943#543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
 dependencies = [
  "async-trait",
  "blake3",
@@ -4902,7 +4902,7 @@ dependencies = [
  "combine",
  "downcast-rs",
  "dyn-clone",
- "hashbrown 0.17.1",
+ "hashbrown 0.13.2",
  "hi_sparse_bitset 0.10.0",
  "indexmap",
  "inventory",
