@@ -294,7 +294,7 @@ mod tests {
                 },
             });
         }
-        handle.join();
+        handle.join().unwrap();
         let got: Vec<_> = updates.iter().collect();
         assert_eq!(
             got[0],
@@ -326,7 +326,7 @@ mod tests {
                 ..Default::default()
             },
         }));
-        handle.join();
+        handle.join().unwrap();
 
         let got: Vec<InferUpdate> = updates.iter().collect();
         assert!(
@@ -365,7 +365,7 @@ mod tests {
             id: 1,
             request: GenerationRequest::default(), // empty prompt → InvalidRequest
         }));
-        handle.join();
+        handle.join().unwrap();
 
         let got: Vec<InferUpdate> = updates.iter().collect();
         assert!(matches!(
@@ -395,7 +395,7 @@ mod tests {
                 },
             });
         }
-        handle.join();
+        handle.join().unwrap();
 
         let got: Vec<InferUpdate> = updates.iter().collect();
         let finished: Vec<(u64, String)> = got
@@ -429,7 +429,7 @@ mod tests {
             },
         });
         handle.command(InferCommand::Cancel { id: 3 });
-        handle.join();
+        handle.join().unwrap();
 
         let got: Vec<InferUpdate> = updates.iter().collect();
         assert!(got.contains(&InferUpdate::Cancelled { id: 3 }));
@@ -468,7 +468,7 @@ mod tests {
             },
         });
         handle.command(InferCommand::Cancel { id: 2 });
-        handle.join();
+        handle.join().unwrap();
 
         let got: Vec<InferUpdate> = updates.iter().collect();
         assert!(got.contains(&InferUpdate::Finished {
