@@ -48,3 +48,8 @@ cross-family acceptance; this document records ESP's API and implementation.
   duplicate exact-revision Eidetic/Chartulary types in upstream consumers;
   publication/adoption must align their actual source graph, rather than only
   changing the resident's direct pin. Resident cold/fused gates remain pending.
+
+- 2026-10-20: three guarded-index cases now pass after adding query-vector
+  validation and refusing a saved sparse representation when the provider lacks
+  that capability. The resident also checks the stored representation against
+  its dense-dimension ceiling, independently of provider capability.
