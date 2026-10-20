@@ -26,7 +26,7 @@ rev = "543f5ff38f87a09afc04dbc59f57c2dfbc6a9943"
 [workspace.dependencies.armillary]
 version = "0.1.0"
 git = "https://github.com/merely-made/armillary.git"
-rev = "6827559937f07f78a6a830dfbfcaa54210dd093c"
+rev = "5d8754dc2a00be02d82b075441ac9ea44aa4f135"
 
 [workspace.dependencies.muniment]
 version = "0.1.1"
