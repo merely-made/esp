@@ -114,6 +114,11 @@ impl<K: Hash + Eq + Clone, P: EmbeddingProvider> CompatibleSearch<K, P> {
                 SemanticSearch::with_index(provider, index).map_err(|e| e.to_string())?
             }
             CompatibleVectors::Sparse(index) => {
+                if provider.embed_sparse(&[]).is_none() {
+                    return Err(
+                        "stored sparse index requires the provider's sparse capability".into(),
+                    );
+                }
                 if index.dimensions() != dimensions || index.metric() != metric {
                     return Err("stored sparse index differs from its embedding envelope".into());
                 }
@@ -139,6 +144,9 @@ impl<K: Hash + Eq + Clone, P: EmbeddingProvider> CompatibleSearch<K, P> {
     }
     pub fn envelope(&self) -> &EmbeddingEnvelopeV1 {
         &self.envelope
+    }
+    pub fn is_sparse(&self) -> bool {
+        self.search.is_sparse()
     }
     pub fn len(&self) -> usize {
         self.search.len()
@@ -169,12 +177,38 @@ impl<K: Hash + Eq + Clone, P: EmbeddingProvider> CompatibleSearch<K, P> {
     where
         K: Ord,
     {
-        self.search
-            .search(
-                &format!("{}{question}", self.envelope.space.query_prefix),
-                k,
-            )
-            .map_err(|e| e.to_string())
+        let input = format!("{}{question}", self.envelope.space.query_prefix);
+        if let Some(index) = self.search.sparse_index() {
+            let values = self
+                .search
+                .provider()
+                .embed_sparse(&[&input])
+                .ok_or("provider withdrew sparse capability")?
+                .map_err(|e| e.to_string())?;
+            if values.len() != 1 {
+                return Err("embedding query batch cardinality differs".into());
+            }
+            validate_sparse(&values[0], self.envelope.space.dimensions)?;
+            index
+                .nearest(&values[0], k)
+                .map_err(|e| format!("embedding query: {e:?}"))
+        } else {
+            let values = self
+                .search
+                .provider()
+                .embed(&[&input])
+                .map_err(|e| e.to_string())?;
+            if values.len() != 1
+                || values[0].len() != self.envelope.space.dimensions
+                || values[0].iter().any(|v| !v.is_finite())
+            {
+                return Err("invalid dense embedding query or batch cardinality".into());
+            }
+            self.search
+                .index()
+                .nearest(&values[0], k)
+                .map_err(|e| format!("embedding query: {e:?}"))
+        }
     }
 }
 
@@ -306,5 +340,49 @@ mod tests {
             CompatibleSearch::reopen(LexicalEmbeddingProvider::new(384).unwrap(), corpus(), saved)
                 .is_err()
         );
+    }
+    #[test]
+    fn malformed_query_batches_and_withdrawn_sparse_capability_are_refused() {
+        struct Dense;
+        impl EmbeddingProvider for Dense {
+            fn compatibility_space(&self) -> Option<eidetic::models::embedding::EmbeddingSpaceV1> {
+                LexicalEmbeddingProvider::new(384)
+                    .unwrap()
+                    .compatibility_space()
+            }
+            fn dimensions(&self) -> usize {
+                384
+            }
+            fn metric(&self) -> SimilarityMetric {
+                SimilarityMetric::Cosine
+            }
+            fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, super::super::EmbedError> {
+                Ok(texts
+                    .iter()
+                    .map(|text| match *text {
+                        "missing" => Vec::new(),
+                        "nan" => vec![f32::NAN; 384],
+                        _ => vec![1.0; 384],
+                    })
+                    .collect())
+            }
+        }
+        let sparse = CompatibleSearch::build(
+            LexicalEmbeddingProvider::new(384).unwrap(),
+            corpus(),
+            &[("a", "text")],
+        )
+        .unwrap();
+        assert!(
+            CompatibleSearch::reopen(Dense, corpus(), sparse.snapshot())
+                .err()
+                .unwrap()
+                .contains("sparse capability")
+        );
+        let dense = CompatibleSearch::build(Dense, corpus(), &[("a", "text")]).unwrap();
+        assert!(!dense.is_sparse());
+        assert!(dense.search("missing", 1).is_err());
+        assert!(dense.search("nan", 1).is_err());
+        assert_eq!(dense.search("valid", 1).unwrap().len(), 1);
     }
 }
