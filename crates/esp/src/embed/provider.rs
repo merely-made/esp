@@ -50,7 +50,7 @@ impl std::fmt::Display for EmbedError {
         match self {
             EmbedError::InputTooLong { length, limit } => {
                 write!(f, "input too long: {length} > {limit}")
-            },
+            }
             EmbedError::ModelNotLoaded => write!(f, "model not loaded"),
             EmbedError::Backend(msg) => write!(f, "backend: {msg}"),
             EmbedError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
@@ -67,6 +67,15 @@ impl std::error::Error for EmbedError {}
 /// text wrap it in a single-element slice; batched calls let GPU-backed
 /// providers amortise dispatch overhead.
 pub trait EmbeddingProvider: Send + Sync {
+    /// Exact identity of the loaded algorithm/artifacts and transformations.
+    /// Unknown/unloaded/test providers cannot enter guarded persistence.
+    /// `CompatibleSearch` applies the declared role-specific literal prefixes;
+    /// this provider's raw embed methods must not apply those prefixes again.
+    #[cfg(feature = "persistence")]
+    fn compatibility_space(&self) -> Option<eidetic::models::embedding::EmbeddingSpaceV1> {
+        None
+    }
+
     /// Output vector dimension. Constant for the lifetime of this provider.
     fn dimensions(&self) -> usize;
 
@@ -104,6 +113,11 @@ pub trait EmbeddingProvider: Send + Sync {
 /// dependency the ESP-owned constructors exist to remove. With it, `Box<dyn
 /// EmbeddingProvider>` flows into everything generic over `P: EmbeddingProvider`.
 impl EmbeddingProvider for Box<dyn EmbeddingProvider> {
+    #[cfg(feature = "persistence")]
+    fn compatibility_space(&self) -> Option<eidetic::models::embedding::EmbeddingSpaceV1> {
+        (**self).compatibility_space()
+    }
+
     fn dimensions(&self) -> usize {
         (**self).dimensions()
     }
@@ -122,6 +136,25 @@ impl EmbeddingProvider for Box<dyn EmbeddingProvider> {
 
     fn embed_sparse(&self, texts: &[&str]) -> Option<Result<Vec<SparseVector>, EmbedError>> {
         (**self).embed_sparse(texts)
+    }
+}
+
+impl<P: EmbeddingProvider + ?Sized> EmbeddingProvider for std::sync::Arc<P> {
+    fn dimensions(&self) -> usize {
+        (**self).dimensions()
+    }
+    fn metric(&self) -> SimilarityMetric {
+        (**self).metric()
+    }
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        (**self).embed(texts)
+    }
+    fn embed_sparse(&self, texts: &[&str]) -> Option<Result<Vec<SparseVector>, EmbedError>> {
+        (**self).embed_sparse(texts)
+    }
+    #[cfg(feature = "persistence")]
+    fn compatibility_space(&self) -> Option<eidetic::models::embedding::EmbeddingSpaceV1> {
+        (**self).compatibility_space()
     }
 }
 

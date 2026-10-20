@@ -190,3 +190,19 @@ and declared context-KV payload. `resident_payload_bytes` excludes backend,
 RoPE, activation, artifact-transfer and allocator reserves. Resident placement
 retains the streamed row's format, session and query-chunk prefill arithmetic;
 placement changes are provenance rather than a new model session.
+
+
+## Guarded embedding projections
+
+With `persistence`, `embed::compatible::CompatibleSearch` binds a dense or sparse
+index to Eidetic's exact embedding envelope. Providers report the algorithm,
+loaded artifact digests, tokenizer, preprocessing, pooling, role prefixes,
+normalization, shape and metric. The host supplies the versioned chunker and
+exact retained source revisions. Reopen validates the entire envelope and
+numerical representation before search; unlabeled legacy indexes require a
+rebuild. Generic `VectorIndex` and `SemanticSearch` remain available independently.
+
+Loaded BERT buffers and the deterministic lexical algorithm supply identities;
+unknown/manual component assemblies refuse guarded persistence. The core
+contract and resident acceptance are linked from
+`design_docs/2026-10-20_embedding_compatibility_plan.md`.

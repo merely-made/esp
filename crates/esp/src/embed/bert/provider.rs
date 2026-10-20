@@ -38,6 +38,8 @@ pub struct BertEmbeddingProvider {
     device: Device,
     pooling: Pooling,
     l2_normalize: bool,
+    #[cfg(feature = "persistence")]
+    artifacts: Option<std::collections::BTreeMap<String, eidetic::Hash>>,
 }
 
 /// One forced tensor readback in the feature-gated BERT validation corridor.
@@ -97,6 +99,8 @@ impl BertEmbeddingProvider {
             device,
             pooling: Pooling::Mean,
             l2_normalize: true,
+            #[cfg(feature = "persistence")]
+            artifacts: None,
         }
     }
 
@@ -115,6 +119,8 @@ impl BertEmbeddingProvider {
             device,
             pooling: Pooling::Mean,
             l2_normalize: true,
+            #[cfg(feature = "persistence")]
+            artifacts: None,
         }
     }
 
@@ -155,14 +161,31 @@ impl BertEmbeddingProvider {
     /// `Device` is the backend device on which tensors live (e.g.
     /// `NdArrayDevice::default()` for CPU, a wgpu device for GPU).
     pub fn load(model_dir: impl AsRef<Path>, device: Device) -> Result<Self, EmbedError> {
-        let artifacts = load_artifacts(model_dir)?;
-        let model = load_into_model(&artifacts, &device)?;
-        Ok(Self::new_with_components(
-            artifacts.config,
-            model,
-            artifacts.tokenizer,
-            device,
-        ))
+        #[cfg(feature = "persistence")]
+        {
+            let dir = model_dir.as_ref();
+            let read = |name| {
+                std::fs::read(dir.join(name))
+                    .map_err(|e| EmbedError::Backend(format!("embedding artifact {name}: {e}")))
+            };
+            return Self::from_bytes(
+                &read("config.json")?,
+                &read("tokenizer.json")?,
+                &read("model.safetensors")?,
+                device,
+            );
+        }
+        #[cfg(not(feature = "persistence"))]
+        {
+            let artifacts = load_artifacts(model_dir)?;
+            let model = load_into_model(&artifacts, &device)?;
+            Ok(Self::new_with_components(
+                artifacts.config,
+                model,
+                artifacts.tokenizer,
+                device,
+            ))
+        }
     }
 
     /// In-memory constructor: build a fully-wired provider from already-
@@ -187,7 +210,19 @@ impl BertEmbeddingProvider {
             config.pad_token_id as u32,
         )?;
         let model = load_into_model_from_bytes(&config, weights_bytes, &device)?;
-        Ok(Self::new_with_components(config, model, tokenizer, device))
+        let mut provider = Self::new_with_components(config, model, tokenizer, device);
+        #[cfg(feature = "persistence")]
+        {
+            provider.artifacts = Some(
+                [
+                    ("config.json".into(), eidetic::Hash::of(config_bytes)),
+                    ("tokenizer.json".into(), eidetic::Hash::of(tokenizer_bytes)),
+                    ("model.safetensors".into(), eidetic::Hash::of(weights_bytes)),
+                ]
+                .into(),
+            );
+        }
+        Ok(provider)
     }
 
     /// Embed a batch without synchronously blocking on backend readback.
@@ -420,6 +455,53 @@ fn rows_from_flat(flat: Vec<f32>, dims: [usize; 2]) -> Vec<Vec<f32>> {
 }
 
 impl EmbeddingProvider for BertEmbeddingProvider {
+    #[cfg(feature = "persistence")]
+    fn compatibility_space(&self) -> Option<eidetic::models::embedding::EmbeddingSpaceV1> {
+        use eidetic::models::embedding::*;
+        if !self.is_loaded() {
+            return None;
+        }
+        let artifacts = self.artifacts.clone()?;
+        let component = |name: &str| EmbeddingComponentV1 {
+            name: name.into(),
+            revision: "v1".into(),
+            parameters: Default::default(),
+            artifacts: Default::default(),
+        };
+        let mut producer = component("esp.bert-f32");
+        producer.artifacts = artifacts.clone();
+        let mut tokenizer = component("huggingface.tokenizers-0.20.4");
+        tokenizer
+            .artifacts
+            .insert("tokenizer.json".into(), artifacts["tokenizer.json"]);
+        let mut preprocessing = component("esp.bert-tokenizer");
+        preprocessing.parameters.insert(
+            "max_sequence_length".into(),
+            self.config.max_position_embeddings.to_string(),
+        );
+        preprocessing
+            .parameters
+            .insert("padding".into(), "batch-longest/right".into());
+        preprocessing
+            .parameters
+            .insert("pad_token_id".into(), self.config.pad_token_id.to_string());
+        Some(EmbeddingSpaceV1 {
+            producer,
+            tokenizer,
+            preprocessing,
+            pooling: match self.pooling {
+                Pooling::Mean => "attention-mask-mean",
+                Pooling::Cls => "cls",
+            }
+            .into(),
+            query_prefix: "".into(),
+            document_prefix: "".into(),
+            normalization: if self.l2_normalize { "l2-f32" } else { "none" }.into(),
+            dimensions: self.dimensions(),
+            metric: EmbeddingMetric::Cosine,
+        })
+    }
+
     fn dimensions(&self) -> usize {
         self.config.hidden_size
     }
@@ -573,4 +655,60 @@ pub fn from_bytes_cpu(
         Device::ndarray(),
     )?;
     Ok(Box::new(provider))
+}
+
+#[cfg(all(test, feature = "persistence"))]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires digest-pinned ESP_MINILM_DIR"]
+    fn loaded_bert_artifacts_and_output_transforms_bind_the_space() {
+        let path = std::path::PathBuf::from(std::env::var_os("ESP_MINILM_DIR").unwrap());
+        let provider = BertEmbeddingProvider::load(&path, Device::ndarray()).unwrap();
+        let first = provider.compatibility_space().unwrap();
+        assert_eq!(first.dimensions, 384);
+        assert_eq!(first.producer.artifacts.len(), 3);
+        assert_eq!(
+            first.producer.artifacts["model.safetensors"],
+            eidetic::Hash::of(&std::fs::read(path.join("model.safetensors")).unwrap())
+        );
+        let mut index = crate::embed::VectorIndex::<String>::new(384, SimilarityMetric::Cosine);
+        index
+            .insert(
+                "retained".into(),
+                provider
+                    .embed_one("A retained source describes a bicycle chain and gears.")
+                    .unwrap(),
+            )
+            .unwrap();
+        let corpus = eidetic::models::embedding::EmbeddingCorpusV1 {
+            chunker: "qualification/v1".into(),
+            sources: vec![],
+        };
+        let saved = crate::embed::compatible::CompatibleIndex {
+            envelope: eidetic::models::embedding::EmbeddingEnvelopeV1 {
+                version: 1,
+                space: first.clone(),
+                corpus: corpus.clone(),
+            },
+            vectors: crate::embed::compatible::CompatibleVectors::Dense(index),
+        };
+        let foreign = provider.with_pooling(Pooling::Cls).with_l2_normalize(false);
+        let changed = foreign.compatibility_space().unwrap();
+        assert!(
+            crate::embed::compatible::CompatibleSearch::reopen(foreign, corpus, saved)
+                .err()
+                .unwrap()
+                .contains("foreign embedding space")
+        );
+        assert_eq!(first.dimensions, changed.dimensions);
+        assert_ne!(first.pooling, changed.pooling);
+        assert_ne!(first.normalization, changed.normalization);
+        assert_eq!(first.producer, changed.producer);
+        assert!(
+            BertEmbeddingProvider::new(crate::embed::MINILM_L6_V2.clone(), Device::ndarray())
+                .compatibility_space()
+                .is_none()
+        );
+    }
 }
