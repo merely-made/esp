@@ -109,7 +109,7 @@ impl<'a> StreamObserver<'a> {
             Err(error) => {
                 self.decode_error = Some(error);
                 return ControlFlow::Break(());
-            },
+            }
         };
         // Hold back non-prefix decodes (mid-byte BPE boundary); the text
         // arrives with a later token.
@@ -183,6 +183,11 @@ impl<'a> StreamObserver<'a> {
 }
 
 impl DecoderProvider {
+    /// Owner-admitted dense layer payload retained only for this provider.
+    pub fn with_layer_cache(mut self, budget: u64) -> Result<Self, InferError> {
+        self.model = self.model.with_layer_cache(budget)?;
+        Ok(self)
+    }
     /// Keep all verified indexed layers resident under host admission.
     pub fn with_resident_layers(mut self) -> Result<Self, InferError> {
         self.model = self.model.with_resident_layers()?;
