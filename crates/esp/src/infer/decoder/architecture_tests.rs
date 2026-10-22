@@ -102,6 +102,29 @@ fn check_on(name: &str, device: Device) {
         &device,
     )
     .unwrap();
+    let first_layer = safetensors::SafeTensors::deserialize(&artifacts[0]).unwrap();
+    let layer_budget: u64 = if config.moe.is_none() {
+        first_layer
+            .tensors()
+            .iter()
+            .map(|(_, t)| t.shape().iter().product::<usize>() as u64 * 4)
+            .sum()
+    } else {
+        0
+    };
+    let cached = DecoderModel::from_layer_source(
+        config.clone(),
+        loader::load_decoder_shared_tensors(&config, &shared_tensors, &device).unwrap(),
+        Box::new(streaming::cache_verified_layers(
+            Arc::new(make_source()),
+            2 * 1024 * 1024,
+        )),
+        options.clone(),
+        &device,
+    )
+    .unwrap()
+    .with_layer_cache(layer_budget)
+    .unwrap();
     let source = make_source();
     let first = DecoderStage::from_source(
         config.clone(),
@@ -158,6 +181,7 @@ fn check_on(name: &str, device: Device) {
     for (mode, model) in [
         ("resident", resident),
         ("streamed", streamed),
+        ("cached-streamed", cached),
         ("staged", staged),
         ("shared-row-shards", sharded),
     ] {
@@ -173,6 +197,26 @@ fn check_on(name: &str, device: Device) {
                 .into_data()
                 .try_to_vec::<f32>()
                 .unwrap();
+            if mode == "cached-streamed" {
+                let stats = model.streaming_stats().unwrap();
+                let cached = stats.verified_cache.unwrap();
+                assert_eq!(cached.misses as usize, config.num_hidden_layers);
+                let retained = usize::from(config.moe.is_none());
+                assert_eq!(
+                    cached.hits as usize,
+                    step * (config.num_hidden_layers - retained)
+                );
+                if retained > 0 {
+                    let device_cache = stats.device_cache.unwrap();
+                    assert_eq!(device_cache.layers, 1);
+                    assert_eq!(device_cache.hits as usize, step);
+                    assert_eq!(device_cache.retained_payload_bytes, layer_budget);
+                    assert!(
+                        device_cache.retained_payload_bytes <= device_cache.payload_budget_bytes
+                    );
+                }
+                assert!(cached.retained_capacity_bytes <= cached.capacity_budget_bytes);
+            }
             if let Some(moe) = &config.moe
                 && mode == "streamed"
             {
@@ -216,6 +260,10 @@ fn check_on(name: &str, device: Device) {
             row["generated_ids"],
             "{name}/{mode}: cached tokens versus full-recompute Transformers"
         );
+        if mode == "cached-streamed" {
+            let uncached = model.with_layer_cache(0).unwrap();
+            assert!(uncached.streaming_stats().unwrap().device_cache.is_none());
+        }
     }
 }
 

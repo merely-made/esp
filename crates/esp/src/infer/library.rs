@@ -127,7 +127,7 @@ async fn resolve_library_row(
             Some(qualification) => qualification.validate()?,
             None if !candidate => {
                 return Err(failure("weight format candidate has not been measured"));
-            },
+            }
             None => (),
         }
         Some(index)
@@ -191,13 +191,13 @@ async fn resolve_library_row(
                     }) =>
             {
                 ()
-            },
+            }
             (None, None) => (),
             _ => {
                 return Err(failure(
                     "expert index dimensions disagree with decoder config",
                 ));
-            },
+            }
         }
     }
     let resolved = if let Some(index) = &layered {
@@ -237,6 +237,12 @@ async fn resolve_library_row(
         formatted,
         experts,
     })
+}
+
+enum LocalWeightPlacement {
+    Streamed,
+    Cached(u64),
+    Resident,
 }
 
 impl ResolvedInferenceRow {
@@ -402,7 +408,33 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Option<Box<dyn LayerSource>>,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
-        self.load_execution(device, loader, max_tokens, source, None, false)
+        self.load_execution(
+            device,
+            loader,
+            max_tokens,
+            source,
+            None,
+            LocalWeightPlacement::Streamed,
+        )
+    }
+
+    /// Same indexed session with an owner-admitted partial dense layer cache.
+    pub fn load_with_layer_cache(
+        &self,
+        device: &DecoderDevice,
+        loader: &str,
+        max_tokens: usize,
+        source: Option<Box<dyn LayerSource>>,
+        budget: u64,
+    ) -> Result<SessionProvider<DecoderProvider>, InferError> {
+        self.load_execution(
+            device,
+            loader,
+            max_tokens,
+            source,
+            None,
+            LocalWeightPlacement::Cached(budget),
+        )
     }
 
     /// First rung of the same indexed session: all layers stay on this device.
@@ -413,7 +445,14 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Box<dyn LayerSource>,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
-        self.load_execution(device, loader, max_tokens, Some(source), None, true)
+        self.load_execution(
+            device,
+            loader,
+            max_tokens,
+            Some(source),
+            None,
+            LocalWeightPlacement::Resident,
+        )
     }
 
     /// The stage chain is a placement of this exact layer-indexed session.
@@ -438,7 +477,7 @@ impl ResolvedInferenceRow {
                 ))
             })),
             Some(stages),
-            false,
+            LocalWeightPlacement::Streamed,
         )
     }
 
@@ -499,7 +538,7 @@ impl ResolvedInferenceRow {
         max_tokens: usize,
         source: Option<Box<dyn LayerSource>>,
         stages: Option<Box<dyn super::decoder::stage::StageExecutor>>,
-        resident: bool,
+        placement: LocalWeightPlacement,
     ) -> Result<SessionProvider<DecoderProvider>, InferError> {
         self.validate_qualification(loader)?;
         let provider = if let Some(index) = &self.layered {
@@ -530,10 +569,10 @@ impl ResolvedInferenceRow {
         }
         .with_literal_prompt()
         .with_template_eos(&PromptTemplate::from_bytes(&self.template_bytes)?.eos);
-        let provider = if resident {
-            provider.with_resident_layers()?
-        } else {
-            provider
+        let provider = match placement {
+            LocalWeightPlacement::Resident => provider.with_resident_layers()?,
+            LocalWeightPlacement::Cached(budget) => provider.with_layer_cache(budget)?,
+            LocalWeightPlacement::Streamed => provider,
         };
         let provider = if let Some(stages) = stages {
             provider.with_stages(stages)?
