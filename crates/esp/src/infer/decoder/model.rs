@@ -576,9 +576,10 @@ impl DecoderModel {
                 } else {
                     None
                 };
-                let loaded = if let Some(loaded) = cached {
-                    loaded
+                let (loaded, retained) = if let Some(loaded) = cached {
+                    (loaded, true)
                 } else {
+                    let mut retained = false;
                     let bytes = streamed.read(index)?;
                     let tensors =
                         safetensors::SafeTensors::deserialize(&bytes).map_err(|error| {
@@ -622,9 +623,10 @@ impl DecoderModel {
                         {
                             cache.payload += payload;
                             cache.entries.push((index, loaded.clone()));
+                            retained = true;
                         }
                     }
-                    loaded
+                    (loaded, retained)
                 };
                 let layer = DecoderLayer::from_loaded(&self.config, loaded, &device);
                 h = layer.forward_cached_chunked(
@@ -634,12 +636,15 @@ impl DecoderModel {
                     start,
                     streamed.options.query_chunk,
                 )?;
-                // A lazy backend must execute this layer, including KV writes,
-                // before transient weights are dropped and another layer is loaded.
-                // Only an explicitly admitted cache retains layer weight handles.
-                device.sync().map_err(|error| {
-                    InferError::Backend(format!("drain streamed layer: {error}"))
-                })?;
+                // Drain before dropping transient weights. Cached weights stay
+                // alive in the admitted owner budget, so consecutive cached
+                // layers can queue together, as fully resident execution does.
+                // The next transient layer (or final logits read) drains them.
+                if !retained {
+                    device.sync().map_err(|error| {
+                        InferError::Backend(format!("drain streamed layer: {error}"))
+                    })?;
+                }
                 drop(layer);
             }
         } else {
