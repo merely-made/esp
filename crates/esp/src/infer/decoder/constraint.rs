@@ -281,9 +281,12 @@ impl Constraint {
                 .tokens
                 .get(id)
                 .is_some_and(|bytes| !bytes.is_empty() && !self.after(bytes).is_empty());
-            if !allowed {
+            // NaN sorts above finite values under total_cmp, and +infinity
+            // makes the sampler's stable softmax undefined. Neither can be
+            // an eligible model choice, even when another token is finite.
+            if !allowed || !logit.is_finite() {
                 *logit = f32::NEG_INFINITY;
-            } else if logit.is_finite() {
+            } else {
                 any = true;
             }
         }
@@ -459,5 +462,34 @@ pub(super) mod tests {
         assert!(c.complete());
         assert!(c.accept(b'\n' as u32).is_err());
         assert!(Constraint::new(&string(4097), &t, 256).is_err());
+    }
+    #[test]
+    fn nonfinite_scores_cannot_win_or_create_an_eligible_choice() {
+        let t = tokenizer();
+        let grammar = OutputGrammar::Choice {
+            alternatives: vec![
+                OutputGrammar::Literal { value: "a".into() },
+                OutputGrammar::Literal { value: "b".into() },
+            ],
+        };
+        let c = Constraint::new(&grammar, &t, 256).unwrap();
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut row = vec![0.; 256];
+            row[b'a' as usize] = invalid;
+            row[b'b' as usize] = 2.;
+            c.mask(&mut row).unwrap();
+            assert_eq!(row[b'a' as usize], f32::NEG_INFINITY);
+            let best = row
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .unwrap()
+                .0;
+            assert_eq!(best, b'b' as usize);
+        }
+        let mut row = vec![f32::NAN; 256];
+        row[b'b' as usize] = f32::INFINITY;
+        assert!(c.mask(&mut row).is_err());
+        assert!(row.iter().all(|v| *v == f32::NEG_INFINITY));
     }
 }
