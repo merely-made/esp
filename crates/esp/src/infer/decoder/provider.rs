@@ -38,6 +38,8 @@ pub struct DecoderProvider {
     capability: ModelCapability,
     add_special_tokens: bool,
     eos_token_ids: Vec<u32>,
+    #[cfg(test)]
+    score_faults: std::sync::Mutex<std::collections::BTreeMap<usize, Vec<f32>>>,
 }
 
 /// Decoder-specific details that the portable [`InferenceProvider`] seam does
@@ -182,6 +184,32 @@ impl<'a> StreamObserver<'a> {
     }
 }
 
+/// A corrupt backend row must never become a token decision. Rebuild the
+/// exact committed prefix once per generation call; deterministic corruption
+/// still fails closed. This does not alter checkpoints, grammar or RNG draws.
+fn finite_score_row(
+    row: Vec<f32>,
+    recovered: &mut bool,
+    recompute: impl FnOnce() -> Result<Vec<f32>, InferError>,
+) -> Result<Vec<f32>, InferError> {
+    if row.iter().all(|v| v.is_finite()) {
+        return Ok(row);
+    }
+    if *recovered {
+        return Err(InferError::Backend(
+            "non-finite model scores after numerical recovery was already used".into(),
+        ));
+    }
+    *recovered = true;
+    let fresh = recompute()?;
+    if fresh.len() != row.len() || fresh.iter().any(|v| !v.is_finite()) {
+        return Err(InferError::Backend(
+            "recomputed model scores are non-finite or have changed vocabulary size".into(),
+        ));
+    }
+    Ok(fresh)
+}
+
 impl DecoderProvider {
     /// Owner-admitted dense layer payload retained only for this provider.
     pub fn with_layer_cache(mut self, budget: u64) -> Result<Self, InferError> {
@@ -223,6 +251,8 @@ impl DecoderProvider {
             capability,
             add_special_tokens: true,
             eos_token_ids,
+            #[cfg(test)]
+            score_faults: Default::default(),
         }
     }
 
@@ -660,6 +690,7 @@ impl InferenceProvider for DecoderProvider {
             &device,
         );
         let mut logits = self.model.try_forward_cached_last(input, &mut cache)?;
+        let mut score_recovery_used = false;
         while cp.token_ids.len() < max_new {
             // No draw is spent on a paused, cancelled or stopped device.
             if stop() {
@@ -679,6 +710,46 @@ impl InferenceProvider for DecoderProvider {
                         .into_data()
                         .try_to_vec::<f32>()
                         .map_err(|e| InferError::Backend(e.to_string()))?;
+                    #[cfg(test)]
+                    if let Some(fault) = self
+                        .score_faults
+                        .lock()
+                        .unwrap()
+                        .remove(&cp.token_ids.len())
+                    {
+                        row = fault;
+                    }
+                    if row.iter().any(|value| !value.is_finite()) && stop() {
+                        return Ok(cp);
+                    }
+                    row = finite_score_row(row, &mut score_recovery_used, || {
+                        // Scores correspond to the next token after exactly
+                        // these retained IDs. No token has been selected yet.
+                        let mut ids = cp.prompt_ids.clone();
+                        ids.extend_from_slice(&cp.token_ids);
+                        tracing::warn!(
+                            output_tokens = cp.token_ids.len(),
+                            "non-finite decoder scores; recomputing committed prefix once"
+                        );
+                        cache = self.model.new_cache();
+                        let input = Tensor::<2, Int>::from_data(
+                            TensorData::new(
+                                ids.iter().map(|&id| id as i32).collect::<Vec<_>>(),
+                                [1, ids.len()],
+                            ),
+                            &device,
+                        );
+                        self.model
+                            .try_forward_cached_last(input, &mut cache)?
+                            .into_data()
+                            .try_to_vec::<f32>()
+                            .map_err(|error| {
+                                InferError::Backend(format!("read recomputed scores: {error}"))
+                            })
+                    })?;
+                    if stop() {
+                        return Ok(cp);
+                    }
                     grammar.mask(&mut row)?;
                     match &mut picker {
                         TokenPicker::Greedy => {
@@ -813,6 +884,160 @@ mod tests {
             max_tokens,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn corrupt_scores_recompute_once_before_any_token_choice() {
+        let mut used = false;
+        let healthy = finite_score_row(vec![f32::NAN, f32::INFINITY], &mut used, || {
+            Ok(vec![1., 2.])
+        })
+        .unwrap();
+        assert!(used);
+        assert_eq!(healthy, vec![1., 2.]);
+        assert!(
+            finite_score_row(vec![f32::NAN], &mut used, || panic!(
+                "recovery budget must not be spent twice"
+            ))
+            .is_err()
+        );
+        let mut used = false;
+        assert!(
+            finite_score_row(vec![f32::NAN], &mut used, || Ok(vec![f32::NEG_INFINITY])).is_err()
+        );
+        assert!(used);
+        let mut used = false;
+        assert!(finite_score_row(vec![f32::NAN], &mut used, || Ok(vec![1., 2.])).is_err());
+    }
+
+    #[test]
+    fn valid_scores_preserve_values_and_do_not_recompute() {
+        let mut used = false;
+        let scores = vec![-2., 0., 3.];
+        assert_eq!(
+            finite_score_row(scores.clone(), &mut used, || panic!(
+                "finite rows must retain the ordinary execution path"
+            ))
+            .unwrap(),
+            scores
+        );
+        assert!(!used);
+    }
+
+    #[test]
+    fn numerical_recovery_preserves_committed_prefix_and_sampling_draws() {
+        use crate::infer::OutputGrammar as G;
+        let mut config = tiny_config();
+        config.vocab_size = 256;
+        config.max_position_embeddings = 128;
+        let dev = Device::ndarray();
+        let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
+        let provider = DecoderProvider::from_parts(
+            model,
+            super::super::constraint::tests::tokenizer(),
+            "test/bytes",
+            "burn-ndarray",
+        );
+        for temperature in [0., 0.7] {
+            let mut r = request("x", 64);
+            r.temperature = temperature;
+            r.seed = Some(17);
+            r.output_grammar = Some(G::Sequence {
+                items: vec![
+                    G::Literal {
+                        value: "{\"ok\":".into(),
+                    },
+                    G::Choice {
+                        alternatives: vec![
+                            G::Literal {
+                                value: "true}".into(),
+                            },
+                            G::Literal {
+                                value: "false}".into(),
+                            },
+                        ],
+                    },
+                ],
+            });
+            let full = provider
+                .generate_checkpointed(&r, None, &mut |_| Ok(()), &mut || false)
+                .unwrap();
+            provider
+                .score_faults
+                .lock()
+                .unwrap()
+                .insert(6, vec![f32::NAN; 256]);
+            let recovered = provider
+                .generate_checkpointed(&r, None, &mut |_| Ok(()), &mut || false)
+                .unwrap();
+            assert_eq!(full, recovered);
+            assert!(provider.score_faults.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn repeated_numerical_fault_stops_before_a_second_token_decision() {
+        use crate::infer::OutputGrammar as G;
+        let mut config = tiny_config();
+        config.vocab_size = 256;
+        config.max_position_embeddings = 128;
+        let dev = Device::ndarray();
+        let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
+        let provider = DecoderProvider::from_parts(
+            model,
+            super::super::constraint::tests::tokenizer(),
+            "test/bytes",
+            "burn-ndarray",
+        );
+        let mut r = request("x", 64);
+        let choice = G::Choice {
+            alternatives: vec![
+                G::Literal {
+                    value: "true".into(),
+                },
+                G::Literal {
+                    value: "false".into(),
+                },
+            ],
+        };
+        r.output_grammar = Some(G::Sequence {
+            items: vec![
+                G::Literal {
+                    value: "{\"first\":".into(),
+                },
+                choice.clone(),
+                G::Literal {
+                    value: ",\"second\":".into(),
+                },
+                choice,
+                G::Literal { value: "}".into() },
+            ],
+        });
+        let full = provider
+            .generate_checkpointed(&r, None, &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        let second = full.text.find("\"second\":").unwrap() + 9;
+        provider
+            .score_faults
+            .lock()
+            .unwrap()
+            .extend([(9, vec![f32::NAN; 256]), (second, vec![f32::NAN; 256])]);
+        let mut last = None;
+        let result = provider.generate_checkpointed(
+            &r,
+            None,
+            &mut |cp| {
+                last = Some(cp.clone());
+                Ok(())
+            },
+            &mut || false,
+        );
+        assert!(matches!(result, Err(InferError::Backend(_))));
+        let last = last.unwrap();
+        assert!(!last.complete);
+        assert_eq!(last.token_ids, full.token_ids[..second]);
+        assert_eq!(last.text, full.text[..second]);
+        assert!(provider.score_faults.lock().unwrap().is_empty());
     }
 
     #[test]
