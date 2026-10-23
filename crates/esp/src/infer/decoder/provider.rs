@@ -31,6 +31,34 @@ use super::sample::{Sampler, SplitMix64};
 use crate::infer::provider::{GenerationRequest, InferError, InferenceProvider, ModelCapability};
 use burn::tensor::{Device, Int, Tensor, TensorData};
 
+/// Numerical observations for this provider's checkpoint generation calls.
+/// Counts contain no prompt, token text or score values.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct ScoreHealth {
+    pub checked_rows: u64,
+    pub invalid_rows: u64,
+    pub prefix_recomputations: u64,
+    pub failed_recoveries: u64,
+}
+#[derive(Default)]
+struct ScoreCounters {
+    checked_rows: std::sync::atomic::AtomicU64,
+    invalid_rows: std::sync::atomic::AtomicU64,
+    prefix_recomputations: std::sync::atomic::AtomicU64,
+    failed_recoveries: std::sync::atomic::AtomicU64,
+}
+impl ScoreCounters {
+    fn observe(&self, row: &[f32]) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.checked_rows.fetch_add(1, Relaxed);
+        let invalid = row.iter().any(|v| !v.is_finite());
+        if invalid {
+            self.invalid_rows.fetch_add(1, Relaxed);
+        }
+        invalid
+    }
+}
+
 /// A llama-family decoder wired to the `InferenceProvider` seam.
 pub struct DecoderProvider {
     model: DecoderModel,
@@ -38,6 +66,7 @@ pub struct DecoderProvider {
     capability: ModelCapability,
     add_special_tokens: bool,
     eos_token_ids: Vec<u32>,
+    score_counters: ScoreCounters,
     #[cfg(test)]
     score_faults: std::sync::Mutex<std::collections::BTreeMap<usize, Vec<f32>>>,
 }
@@ -251,6 +280,7 @@ impl DecoderProvider {
             capability,
             add_special_tokens: true,
             eos_token_ids,
+            score_counters: Default::default(),
             #[cfg(test)]
             score_faults: Default::default(),
         }
@@ -273,6 +303,17 @@ impl DecoderProvider {
             self.eos_token_ids.push(id);
         }
         self
+    }
+
+    /// Monotonic counts for score rows consumed by checkpoint generation.
+    pub fn score_health(&self) -> ScoreHealth {
+        use std::sync::atomic::Ordering::Relaxed;
+        ScoreHealth {
+            checked_rows: self.score_counters.checked_rows.load(Relaxed),
+            invalid_rows: self.score_counters.invalid_rows.load(Relaxed),
+            prefix_recomputations: self.score_counters.prefix_recomputations.load(Relaxed),
+            failed_recoveries: self.score_counters.failed_recoveries.load(Relaxed),
+        }
     }
 
     pub fn streaming_stats(&self) -> Option<super::streaming::StreamingReadStats> {
@@ -722,7 +763,11 @@ impl InferenceProvider for DecoderProvider {
                     if row.iter().any(|value| !value.is_finite()) && stop() {
                         return Ok(cp);
                     }
-                    row = finite_score_row(row, &mut score_recovery_used, || {
+                    let invalid = self.score_counters.observe(&row);
+                    let checked = finite_score_row(row, &mut score_recovery_used, || {
+                        self.score_counters
+                            .prefix_recomputations
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Scores correspond to the next token after exactly
                         // these retained IDs. No token has been selected yet.
                         let mut ids = cp.prompt_ids.clone();
@@ -739,14 +784,23 @@ impl InferenceProvider for DecoderProvider {
                             ),
                             &device,
                         );
-                        self.model
+                        let fresh = self
+                            .model
                             .try_forward_cached_last(input, &mut cache)?
                             .into_data()
                             .try_to_vec::<f32>()
                             .map_err(|error| {
                                 InferError::Backend(format!("read recomputed scores: {error}"))
-                            })
-                    })?;
+                            })?;
+                        self.score_counters.observe(&fresh);
+                        Ok(fresh)
+                    });
+                    if invalid && checked.is_err() {
+                        self.score_counters
+                            .failed_recoveries
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    row = checked?;
                     if stop() {
                         return Ok(cp);
                     }
@@ -973,6 +1027,10 @@ mod tests {
             assert_eq!(full, recovered);
             assert!(provider.score_faults.lock().unwrap().is_empty());
         }
+        let health = provider.score_health();
+        assert_eq!(health.invalid_rows, 2);
+        assert_eq!(health.prefix_recomputations, 2);
+        assert_eq!(health.failed_recoveries, 0);
     }
 
     #[test]
@@ -1038,6 +1096,10 @@ mod tests {
         assert_eq!(last.token_ids, full.token_ids[..second]);
         assert_eq!(last.text, full.text[..second]);
         assert!(provider.score_faults.lock().unwrap().is_empty());
+        let health = provider.score_health();
+        assert_eq!(health.invalid_rows, 2);
+        assert_eq!(health.prefix_recomputations, 1);
+        assert_eq!(health.failed_recoveries, 1);
     }
 
     #[test]
