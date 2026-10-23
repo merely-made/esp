@@ -454,6 +454,26 @@ impl DecoderProvider {
         on_fragment: &mut dyn FnMut(&str) -> ControlFlow<()>,
         on_generated_token: &mut dyn FnMut(u32),
     ) -> Result<DecoderGeneration, InferError> {
+        if request.output_grammar.is_some() {
+            let cancelled = std::cell::Cell::new(false);
+            let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
+            let mut observed = 0;
+            let cp = self.generate_checkpointed(
+                request,
+                None,
+                &mut |cp| {
+                    for &id in &cp.token_ids[observed..] {
+                        if observer.observe(id).is_break() {
+                            cancelled.set(true);
+                        }
+                    }
+                    observed = cp.token_ids.len();
+                    Ok(())
+                },
+                &mut || cancelled.get(),
+            )?;
+            return observer.finish(cp.token_ids.clone(), false);
+        }
         let (prompt_ids, max_new, mut picker) = self.prepare_generation(request)?;
         let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
         let token_ids = try_generate_ids_with(
@@ -494,6 +514,12 @@ impl DecoderProvider {
         on_generated_token: &mut dyn FnMut(u32),
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<DecoderGeneration, InferError> {
+        if request.output_grammar.is_some() {
+            return Err(InferError::Unsupported {
+                feature: "output_grammar".into(),
+                detail: "async constrained decoding is not implemented".into(),
+            });
+        }
         let (prompt_ids, max_new, mut picker) = self.prepare_generation(request)?;
         let mut observer = StreamObserver::new(self, request, on_fragment, on_generated_token);
         let outcome = generate_ids_with_async_controlled(
@@ -522,6 +548,17 @@ impl InferenceProvider for DecoderProvider {
         stop: &mut dyn FnMut() -> bool,
     ) -> Result<crate::infer::provider::GenerationCheckpoint, InferError> {
         use crate::infer::provider::GenerationCheckpoint;
+        if resume.is_some_and(|cp| {
+            let mut supplied = zeroize::Zeroizing::new(request.clone());
+            if supplied.temperature > 0.0 && supplied.seed.is_none() {
+                supplied.seed = cp.request.seed;
+            }
+            cp.request != *supplied
+        }) {
+            return Err(InferError::InvalidRequest(
+                "checkpoint request differs from supplied request".into(),
+            ));
+        }
         let mut request = zeroize::Zeroizing::new(
             resume.map_or_else(|| request.clone(), |cp| cp.request.clone()),
         );
@@ -557,6 +594,32 @@ impl InferenceProvider for DecoderProvider {
             return Err(InferError::InvalidRequest(
                 "invalid generation checkpoint tokens or draw position".into(),
             ));
+        }
+        let mut constraint = request
+            .output_grammar
+            .as_ref()
+            .map(|grammar| {
+                if !request.stop.is_empty() {
+                    return Err(InferError::InvalidRequest(
+                        "stop strings cannot truncate constrained output".into(),
+                    ));
+                }
+                super::constraint::Constraint::new(
+                    grammar,
+                    &self.tokenizer,
+                    self.model.config().vocab_size,
+                )
+            })
+            .transpose()?;
+        if let Some(grammar) = &mut constraint {
+            for &id in &cp.token_ids {
+                grammar.accept(id)?;
+            }
+            if cp.complete && (!grammar.complete() || cp.text != self.decode(&cp.token_ids)?) {
+                return Err(InferError::InvalidRequest(
+                    "complete checkpoint violates output grammar".into(),
+                ));
+            }
         }
         if cp.complete {
             return Ok(cp);
@@ -602,30 +665,93 @@ impl InferenceProvider for DecoderProvider {
             if stop() {
                 return Ok(cp);
             }
-            let token = picker.pick(&logits);
-            cp.draws += u64::from(sampled);
-            if self.eos_token_ids.contains(&token) {
-                cp.complete = true;
+            let forced = if let Some(grammar) = &constraint {
+                grammar.forced(&self.tokenizer)?
             } else {
-                cp.token_ids.push(token);
-                let _ = observer.observe(token);
-                if let Some(error) = observer.decode_error.take() {
-                    return Err(error);
+                vec![]
+            };
+            let tokens = if forced.is_empty() {
+                let token = if let Some(grammar) = &constraint {
+                    let [_, seq, vocab] = logits.dims();
+                    let mut row = logits
+                        .clone()
+                        .slice([0..1, (seq - 1)..seq, 0..vocab])
+                        .into_data()
+                        .try_to_vec::<f32>()
+                        .map_err(|e| InferError::Backend(e.to_string()))?;
+                    grammar.mask(&mut row)?;
+                    match &mut picker {
+                        TokenPicker::Greedy => {
+                            row.iter()
+                                .enumerate()
+                                .max_by(|a, b| a.1.total_cmp(b.1).then_with(|| b.0.cmp(&a.0)))
+                                .unwrap()
+                                .0 as u32
+                        }
+                        TokenPicker::Sampled(sampler) => sampler.sample(&row),
+                    }
+                } else {
+                    picker.pick(&logits)
+                };
+                vec![token]
+            } else {
+                // Forced syntax consumes the same recorded sampling positions
+                // on replay. It carries no model-selected semantic decision.
+                if let TokenPicker::Sampled(sampler) = &mut picker {
+                    sampler.skip_draws(forced.len() as u64);
                 }
-                cp.complete = observer.stopped_by_string || cp.token_ids.len() == max_new;
+                forced
+            };
+            let mut evaluated = Vec::new();
+            for token in tokens.into_iter().take(max_new - cp.token_ids.len()) {
+                if stop() {
+                    return Ok(cp);
+                }
+                cp.draws += u64::from(sampled);
+                if self.eos_token_ids.contains(&token) {
+                    cp.complete = true;
+                } else {
+                    if let Some(grammar) = &mut constraint {
+                        grammar.accept(token)?;
+                    }
+                    cp.token_ids.push(token);
+                    evaluated.push(token);
+                    let _ = observer.observe(token);
+                    if let Some(error) = observer.decode_error.take() {
+                        return Err(error);
+                    }
+                    cp.complete = constraint.as_ref().map_or(
+                        observer.stopped_by_string || cp.token_ids.len() == max_new,
+                        |g| g.complete(),
+                    );
+                }
+                cp.text = observer.emitted.clone();
+                if cp.complete && !observer.stopped_by_string {
+                    cp.text = self.decode(&cp.token_ids)?;
+                }
+                commit(&cp)?;
+                if cp.complete || stop() {
+                    return Ok(cp);
+                }
             }
-            cp.text = observer.emitted.clone();
-            if cp.complete && !observer.stopped_by_string {
-                cp.text = self.decode(&cp.token_ids)?;
+            if cp.token_ids.len() == max_new {
+                break;
             }
-            commit(&cp)?;
-            if cp.complete || stop() {
-                return Ok(cp);
-            }
-            let step: Tensor<2, Int> =
-                Tensor::from_data(TensorData::new(vec![token as i32], [1, 1]), &device);
+            let step: Tensor<2, Int> = Tensor::from_data(
+                TensorData::new(
+                    evaluated.iter().map(|id| *id as i32).collect::<Vec<_>>(),
+                    [1, evaluated.len()],
+                ),
+                &device,
+            );
             logits = self.model.try_forward_cached_last(step, &mut cache)?;
         }
+        if constraint.is_some() {
+            return Err(InferError::InvalidRequest(
+                "token limit reached before output grammar completed".into(),
+            ));
+        }
+
         cp.complete = true;
         commit(&cp)?;
         Ok(cp)
@@ -687,6 +813,109 @@ mod tests {
             max_tokens,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn constrained_checkpoint_replay_and_truncation_fail_closed() {
+        use crate::infer::OutputGrammar as G;
+        let mut config = tiny_config();
+        config.vocab_size = 256;
+        config.max_position_embeddings = 128;
+        let dev = Device::ndarray();
+        let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
+        let provider = DecoderProvider::from_parts(
+            model,
+            super::super::constraint::tests::tokenizer(),
+            "test/bytes",
+            "burn-ndarray",
+        );
+        let mut r = request("x", 64);
+        r.output_grammar = Some(G::Sequence {
+            items: vec![
+                G::Literal {
+                    value: "{\"ok\":".into(),
+                },
+                G::Choice {
+                    alternatives: vec![
+                        G::Literal {
+                            value: "true}".into(),
+                        },
+                        G::Literal {
+                            value: "false}".into(),
+                        },
+                    ],
+                },
+            ],
+        });
+        let full = provider
+            .generate_checkpointed(&r, None, &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        assert!(full.complete);
+        serde_json::from_str::<serde_json::Value>(&full.text).unwrap();
+        let mut corrupt = full.clone();
+        corrupt.text.push('x');
+        assert!(
+            provider
+                .generate_checkpointed(&r, Some(&corrupt), &mut |_| Ok(()), &mut || false)
+                .is_err()
+        );
+        let pause = std::cell::Cell::new(false);
+        let partial = provider
+            .generate_checkpointed(
+                &r,
+                None,
+                &mut |cp| {
+                    if cp.token_ids.len() == 4 {
+                        pause.set(true);
+                    }
+                    Ok(())
+                },
+                &mut || pause.get(),
+            )
+            .unwrap();
+        assert!(!partial.complete);
+        let resumed = provider
+            .generate_checkpointed(&r, Some(&partial), &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        assert_eq!(resumed.text, full.text);
+        assert_eq!(resumed.token_ids, full.token_ids);
+        let mut changed = r.clone();
+        changed.output_grammar = None;
+        assert!(
+            provider
+                .generate_checkpointed(&changed, Some(&partial), &mut |_| Ok(()), &mut || false)
+                .is_err()
+        );
+        r.temperature = 0.8;
+        r.seed = Some(42);
+        let sampled = provider
+            .generate_checkpointed(&r, None, &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        pause.set(false);
+        let partial = provider
+            .generate_checkpointed(
+                &r,
+                None,
+                &mut |cp| {
+                    if cp.token_ids.len() == 4 {
+                        pause.set(true);
+                    }
+                    Ok(())
+                },
+                &mut || pause.get(),
+            )
+            .unwrap();
+        let resumed = provider
+            .generate_checkpointed(&r, Some(&partial), &mut |_| Ok(()), &mut || false)
+            .unwrap();
+        assert_eq!(sampled.token_ids, resumed.token_ids);
+        assert_eq!(sampled.draws, resumed.draws);
+        r.max_tokens = 2;
+        assert!(
+            provider
+                .generate_checkpointed(&r, None, &mut |_| Ok(()), &mut || false)
+                .is_err()
+        );
     }
 
     #[test]

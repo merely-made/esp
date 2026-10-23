@@ -150,9 +150,14 @@ impl<P: InferenceProvider> SessionProvider<P> {
         rendered.prompt = self.template.render(&request.prompt, context)?;
         zeroize::Zeroize::zeroize(&mut rendered.context);
         rendered.max_tokens = request.max_tokens.min(self.max_tokens);
-        for stop in self.template.stops() {
-            if !rendered.stop.contains(&stop) {
-                rendered.stop.push(stop);
+        // Grammar acceptance terminates constrained documents. Template stops
+        // must not truncate their JSON strings. Explicit caller stops remain
+        // in the request and are refused by the constrained decoder.
+        if rendered.output_grammar.is_none() {
+            for stop in self.template.stops() {
+                if !rendered.stop.contains(&stop) {
+                    rendered.stop.push(stop);
+                }
             }
         }
         self.bound

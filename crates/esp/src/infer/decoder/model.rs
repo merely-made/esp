@@ -723,6 +723,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn warm_blocks_match_single_tokens_and_full_recompute() {
+        use burn::tensor::TensorData;
+        let config = tiny_config();
+        let dev = Device::ndarray();
+        let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
+        let tokens = vec![1i32, 4, 7, 2, 9, 3];
+        let full = model
+            .logits(
+                Tensor::from_data(TensorData::new(tokens.clone(), [1, 6]), &dev),
+                0,
+            )
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        for block in [1, 2, 3] {
+            let mut cache = model.new_cache();
+            let mut rows = Vec::new();
+            for chunk in tokens.chunks(block) {
+                rows.extend(
+                    model
+                        .forward_cached(
+                            Tensor::from_data(
+                                TensorData::new(chunk.to_vec(), [1, chunk.len()]),
+                                &dev,
+                            ),
+                            &mut cache,
+                        )
+                        .into_data()
+                        .try_to_vec::<f32>()
+                        .unwrap(),
+                );
+            }
+            assert_eq!(rows.len(), full.len());
+            for (a, b) in rows.iter().zip(&full) {
+                assert!((a - b).abs() < 1e-5, "block {block}: {a} != {b}");
+            }
+        }
+    }
+
+    #[test]
     fn logits_shape_finite_deterministic() {
         let config = tiny_config();
         let dev = Device::ndarray();
