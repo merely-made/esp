@@ -16,11 +16,9 @@
 //! `[in_features, out_features]`, already transposed from HF's
 //! `[out, in]` at the extraction boundary.
 //!
-//! Two forward shapes share one implementation: the full-sequence
-//! prefill (empty cache, square causal mask) and the cached single-token
-//! decode step (queries attend everything cached, no mask needed). The
-//! cached path is proven equal to naive full recompute by the
-//! generation tests.
+//! Prefill and cached single-token or multi-token blocks share one
+//! implementation. The causal mask accounts for the cached prefix; block and
+//! single-token decoding are checked against the same full recompute.
 
 use burn::nn::{Linear, RmsNorm};
 use burn::tensor::activation::softmax;
@@ -274,11 +272,9 @@ impl DecoderAttention {
     }
 
     /// Cached causal forward: appends this step's keys/values to `cache`
-    /// and attends the query block over everything cached. Two supported
-    /// shapes — prefill (empty cache, any `seq`) and incremental decode
-    /// (`seq == 1` over a warm cache); a multi-token block over a warm
-    /// cache is rejected, since nothing in the generation loop produces
-    /// it.
+    /// and attends the query block over everything cached. The rectangular
+    /// causal mask admits the cached prefix and only earlier positions of a
+    /// new block, including grammar-forced spans over a warm cache.
     pub fn forward_cached(
         &self,
         x: Tensor<3>,
@@ -304,10 +300,6 @@ impl DecoderAttention {
         assert!(query_chunk > 0, "query chunk must be positive");
         let [batch, seq, _hidden] = x.dims();
         let past = cache.cached_len();
-        assert!(
-            past == 0 || seq == 1,
-            "multi-token block over a warm cache is unsupported (past={past}, seq={seq})"
-        );
         let device = x.device();
 
         // Project and split heads: [b, s, n*hd] -> [b, n, s, hd].

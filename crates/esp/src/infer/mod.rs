@@ -43,6 +43,7 @@ pub mod stub;
 pub use actor::{InferCommand, InferUpdate, spawn_inference_actor, spawn_inference_actor_fallible};
 pub use provider::{
     CapabilityQuery, GenerationRequest, InferError, InferenceProvider, ModelCapability,
+    OutputGrammar,
 };
 #[cfg(feature = "model-session")]
 pub use session::{

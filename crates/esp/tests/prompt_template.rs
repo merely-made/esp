@@ -134,3 +134,25 @@ fn empty_context_preserves_the_legacy_serialized_request() {
     assert!(request.context.is_empty());
     assert_eq!(serde_json::to_string(&request).unwrap(), legacy);
 }
+
+#[test]
+fn constrained_requests_keep_grammar_and_use_acceptance_instead_of_template_stops() {
+    let provider = SessionProvider::new(bound(TEMPLATE), TEMPLATE.to_vec(), 256).unwrap();
+    let mut request = GenerationRequest {
+        prompt: "answer".into(),
+        output_grammar: Some(esp::infer::OutputGrammar::Literal { value: "{}".into() }),
+        ..Default::default()
+    };
+    let prepared = provider.prepare(&request, "").unwrap();
+    assert_eq!(prepared.request.output_grammar, request.output_grammar);
+    assert!(prepared.request.stop.is_empty());
+    assert!(matches!(
+        provider.generate(&request),
+        Err(esp::infer::InferError::Unsupported { .. })
+    ));
+    request.stop.push("user stop".into());
+    assert_eq!(
+        provider.prepare(&request, "").unwrap().request.stop,
+        request.stop
+    );
+}
