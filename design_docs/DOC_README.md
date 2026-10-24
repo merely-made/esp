@@ -20,3 +20,4 @@ existing gates. Coordinated ESP → Knot → Mere/product receipt:
 `mere/support/family-promotion/pool-lifetime-20261021.json`.
 
 - [Embedding compatibility](2026-10-20_embedding_compatibility_plan.md) — landed and resident-qualified; provider identities and guarded dense/sparse persistence, with Eidetic P4 and resident I10 as the acceptance owners.
+- [Burn 0.22.1 qualification](2026-10-24_burn_0221_plan.md) — in progress: released dependency cohort, numerical/native/durable-generation checks and receiving composition; Mere owns vendor patches and browser/remote acceptance.

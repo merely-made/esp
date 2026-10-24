@@ -40,7 +40,7 @@ workspace = true
 optional = true
 
 [dependencies.burn]
-version = "=0.22.0"
+version = "=0.22.1"
 default-features = false
 features = [
     "ndarray",
