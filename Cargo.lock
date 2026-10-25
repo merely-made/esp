@@ -2761,7 +2761,7 @@ dependencies = [
  "async-trait",
  "burn",
  "eidetic",
- "esp-test-support",
+ "esp-testkit",
  "getrandom 0.4.3",
  "half",
  "muniment",
@@ -2778,7 +2778,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "esp-test-support"
+name = "esp-testkit"
 version = "0.1.0"
 dependencies = [
  "safetensors 0.4.5",

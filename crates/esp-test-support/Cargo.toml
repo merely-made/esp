@@ -1,11 +1,14 @@
 [package]
-name = "esp-test-support"
+name = "esp-testkit"
 version = "0.1.0"
 rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Supplier-owned tiny decoder fixtures for ESP integration tests"
+
+[lib]
+name = "esp_test_support"
 
 [dependencies]
 safetensors = "0.4"
