@@ -129,6 +129,23 @@ impl OutputHead {
     }
 }
 
+struct LayerTensorCache {
+    budget: u64,
+    payload: u64,
+    hits: u64,
+    misses: u64,
+    entries: Vec<(usize, LoadedDecoderLayer)>,
+}
+impl std::fmt::Debug for LayerTensorCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerTensorCache")
+            .field("budget", &self.budget)
+            .field("payload", &self.payload)
+            .field("layers", &self.entries.len())
+            .finish()
+    }
+}
+
 /// A llama-family decoder model.
 #[derive(Debug)]
 pub struct DecoderModel {
@@ -142,6 +159,7 @@ pub struct DecoderModel {
     format: super::WeightFormat,
     stages: Option<Box<dyn super::stage::StageExecutor>>,
     resident_query_chunk: Option<usize>,
+    device_layer_cache: Option<std::sync::Mutex<LayerTensorCache>>,
 }
 
 impl DecoderModel {
@@ -171,12 +189,13 @@ impl DecoderModel {
             format: super::WeightFormat::F32,
             stages: None,
             resident_query_chunk: None,
+            device_layer_cache: None,
         }
     }
 
     /// Construct the resident embedding/norm/head once, then borrow one
-    /// verified layer artifact for each forward pass. Layer weights and GPU
-    /// work are fully drained before the next layer is read.
+    /// verified layer artifact for each forward pass. By default weights drop
+    /// after each drained layer; `with_layer_cache` may retain an admitted subset.
     pub fn from_layer_source(
         config: DecoderConfig,
         shared: LoadedDecoder,
@@ -246,6 +265,7 @@ impl DecoderModel {
             format: super::WeightFormat::F32,
             stages: None,
             resident_query_chunk: None,
+            device_layer_cache: None,
         })
     }
 
@@ -292,7 +312,50 @@ impl DecoderModel {
     }
 
     pub fn streaming_stats(&self) -> Option<StreamingReadStats> {
-        self.streamed.as_ref().map(StreamingLayers::stats)
+        self.streamed.as_ref().map(|streamed| {
+            let mut stats = streamed.stats();
+            stats.device_cache = self
+                .device_layer_cache
+                .as_ref()
+                .and_then(|cache| cache.lock().ok())
+                .map(|cache| super::streaming::DeviceLayerCacheStats {
+                    hits: cache.hits,
+                    misses: cache.misses,
+                    retained_payload_bytes: cache.payload,
+                    payload_budget_bytes: cache.budget,
+                    layers: cache.entries.len(),
+                });
+            stats
+        })
+    }
+
+    /// Retain a first-fit subset (at most 128) of dense f32 layer tensors.
+    /// The owner must
+    /// admit this *additional weight payload* beside shared weights, KV,
+    /// transient streamed layers, allocator overhead and execution workspace.
+    /// The enclosing provider/foreground guard owns the cache's lifetime.
+    pub fn with_layer_cache(mut self, budget: u64) -> Result<Self, InferError> {
+        if budget == 0 {
+            self.device_layer_cache = None;
+            return Ok(self);
+        }
+        if self.streamed.is_none()
+            || self.stages.is_some()
+            || self.config.moe.is_some()
+            || self.format != super::WeightFormat::F32
+        {
+            return Err(InferError::InvalidConfig(
+                "device layer caching requires a dense f32 indexed model".into(),
+            ));
+        }
+        self.device_layer_cache = Some(std::sync::Mutex::new(LayerTensorCache {
+            budget,
+            payload: 0,
+            hits: 0,
+            misses: 0,
+            entries: vec![],
+        }));
+        Ok(self)
     }
 
     pub fn shared_matrix_layout(&self) -> Option<SharedMatrixLayout> {
@@ -321,6 +384,7 @@ impl DecoderModel {
     /// Retain verified indexed layers without changing format or prefill math.
     /// The host admits weights and full context KV before this placement.
     pub fn with_resident_layers(mut self) -> Result<Self, InferError> {
+        self.device_layer_cache = None;
         let Some(streamed) = self.streamed.as_ref() else {
             return Ok(self);
         };
@@ -357,7 +421,7 @@ impl DecoderModel {
         mut self,
         stages: Box<dyn super::stage::StageExecutor>,
     ) -> Result<Self, InferError> {
-        if self.streamed.is_none() || !self.layers.is_empty() {
+        if self.streamed.is_none() || !self.layers.is_empty() || self.device_layer_cache.is_some() {
             return Err(InferError::InvalidConfig(
                 "stages require a layer-indexed model".into(),
             ));
@@ -494,27 +558,76 @@ impl DecoderModel {
         if let Some(streamed) = &self.streamed {
             let device = self.device();
             for (index, layer_cache) in cache.layers.iter_mut().enumerate() {
-                let bytes = streamed.read(index)?;
-                let tensors = safetensors::SafeTensors::deserialize(&bytes).map_err(|error| {
-                    InferError::InvalidWeights(format!("layer {index}: {error}"))
-                })?;
-                super::loader::validate_layer_names(&self.config, &tensors, index)?;
-                let loaded = super::loader::load_decoder_layer_with_mode(
-                    &self.config,
-                    &tensors,
-                    index,
-                    &device,
-                    self.format,
-                    super::loader::ExpertMode::Streamed(super::moe::ExpertStreaming {
-                        source: streamed.source.clone(),
-                        reads: streamed.expert_reads.clone(),
-                        layer: index,
-                        limit: streamed.options.max_layer_bytes,
-                        format: self.format,
-                    }),
-                )?;
-                drop(tensors);
-                drop(bytes);
+                let cached = if let Some(cache) = &self.device_layer_cache {
+                    let mut cache = cache
+                        .lock()
+                        .map_err(|_| InferError::Backend("device layer cache poisoned".into()))?;
+                    let found = cache
+                        .entries
+                        .iter()
+                        .find(|(key, _)| *key == index)
+                        .map(|(_, loaded)| loaded.clone());
+                    if found.is_some() {
+                        cache.hits += 1;
+                    } else {
+                        cache.misses += 1;
+                    }
+                    found
+                } else {
+                    None
+                };
+                let (loaded, retained) = if let Some(loaded) = cached {
+                    (loaded, true)
+                } else {
+                    let mut retained = false;
+                    let bytes = streamed.read(index)?;
+                    let tensors =
+                        safetensors::SafeTensors::deserialize(&bytes).map_err(|error| {
+                            InferError::InvalidWeights(format!("layer {index}: {error}"))
+                        })?;
+                    super::loader::validate_layer_names(&self.config, &tensors, index)?;
+                    let loaded = super::loader::load_decoder_layer_with_mode(
+                        &self.config,
+                        &tensors,
+                        index,
+                        &device,
+                        self.format,
+                        super::loader::ExpertMode::Streamed(super::moe::ExpertStreaming {
+                            source: streamed.source.clone(),
+                            reads: streamed.expert_reads.clone(),
+                            layer: index,
+                            limit: streamed.options.max_layer_bytes,
+                            format: self.format,
+                        }),
+                    )?;
+                    if let Some(cache) = &self.device_layer_cache {
+                        let payload = tensors
+                            .tensors()
+                            .iter()
+                            .try_fold(0u64, |total, (_, tensor)| {
+                                tensor
+                                    .shape()
+                                    .iter()
+                                    .try_fold(4u64, |n, &d| n.checked_mul(d as u64))
+                                    .and_then(|n| total.checked_add(n))
+                            })
+                            .ok_or_else(|| {
+                                InferError::InvalidWeights("layer payload size overflow".into())
+                            })?;
+                        let mut cache = cache.lock().map_err(|_| {
+                            InferError::Backend("device layer cache poisoned".into())
+                        })?;
+                        if cache.entries.len() < 128
+                            && !cache.entries.iter().any(|(key, _)| *key == index)
+                            && payload <= cache.budget - cache.payload
+                        {
+                            cache.payload += payload;
+                            cache.entries.push((index, loaded.clone()));
+                            retained = true;
+                        }
+                    }
+                    (loaded, retained)
+                };
                 let layer = DecoderLayer::from_loaded(&self.config, loaded, &device);
                 h = layer.forward_cached_chunked(
                     h,
@@ -523,11 +636,15 @@ impl DecoderModel {
                     start,
                     streamed.options.query_chunk,
                 )?;
-                // A lazy backend must execute this layer, including KV writes,
-                // before its weights are dropped and another layer is loaded.
-                device.sync().map_err(|error| {
-                    InferError::Backend(format!("drain streamed layer: {error}"))
-                })?;
+                // Drain before dropping transient weights. Cached weights stay
+                // alive in the admitted owner budget, so consecutive cached
+                // layers can queue together, as fully resident execution does.
+                // The next transient layer (or final logits read) drains them.
+                if !retained {
+                    device.sync().map_err(|error| {
+                        InferError::Backend(format!("drain streamed layer: {error}"))
+                    })?;
+                }
                 drop(layer);
             }
         } else {
@@ -535,7 +652,7 @@ impl DecoderModel {
                 h = match self.resident_query_chunk {
                     Some(chunk) => {
                         layer.forward_cached_chunked(h, &self.rope, layer_cache, start, chunk)?
-                    },
+                    }
                     None => layer.forward_cached(h, &self.rope, layer_cache, start),
                 };
             }
@@ -603,6 +720,46 @@ pub(crate) mod tests {
 
     fn ids(dev: &Dev) -> Tensor<2, Int> {
         Tensor::from_data([[1, 5, 9, 2, 7]], dev)
+    }
+
+    #[test]
+    fn warm_blocks_match_single_tokens_and_full_recompute() {
+        use burn::tensor::TensorData;
+        let config = tiny_config();
+        let dev = Device::ndarray();
+        let model = DecoderModel::from_loaded(config.clone(), det_loaded(&config, &dev), &dev);
+        let tokens = vec![1i32, 4, 7, 2, 9, 3];
+        let full = model
+            .logits(
+                Tensor::from_data(TensorData::new(tokens.clone(), [1, 6]), &dev),
+                0,
+            )
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        for block in [1, 2, 3] {
+            let mut cache = model.new_cache();
+            let mut rows = Vec::new();
+            for chunk in tokens.chunks(block) {
+                rows.extend(
+                    model
+                        .forward_cached(
+                            Tensor::from_data(
+                                TensorData::new(chunk.to_vec(), [1, chunk.len()]),
+                                &dev,
+                            ),
+                            &mut cache,
+                        )
+                        .into_data()
+                        .try_to_vec::<f32>()
+                        .unwrap(),
+                );
+            }
+            assert_eq!(rows.len(), full.len());
+            for (a, b) in rows.iter().zip(&full) {
+                assert!((a - b).abs() < 1e-5, "block {block}: {a} != {b}");
+            }
+        }
     }
 
     #[test]

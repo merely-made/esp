@@ -73,6 +73,12 @@ impl InferenceProvider for StubInferenceProvider {
         request: &GenerationRequest,
         on_token: &mut dyn FnMut(&str) -> std::ops::ControlFlow<()>,
     ) -> Result<String, InferError> {
+        if request.output_grammar.is_some() {
+            return Err(InferError::Unsupported {
+                feature: "output_grammar".into(),
+                detail: "stub provider does not perform constrained decoding".into(),
+            });
+        }
         if request.prompt.is_empty() {
             return Err(InferError::InvalidRequest("empty prompt".to_string()));
         }

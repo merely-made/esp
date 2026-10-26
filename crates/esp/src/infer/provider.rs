@@ -52,6 +52,40 @@ impl ModelCapability {
     }
 }
 
+/// A bounded byte grammar, enforced before token selection. Literal spans may
+/// be tokenized and prefetched together; choices and JSON string contents are
+/// selected from model logits. This is a decoding policy, not output repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OutputGrammar {
+    Literal {
+        value: String,
+    },
+    /// A nonempty JSON string, including its quotes; the bound counts encoded
+    /// content bytes. Raw UTF-8 and the short JSON escapes are supported.
+    JsonString {
+        max_bytes: usize,
+    },
+    Sequence {
+        items: Vec<OutputGrammar>,
+    },
+    Choice {
+        alternatives: Vec<OutputGrammar>,
+    },
+}
+
+impl OutputGrammar {
+    pub fn clear_private(&mut self) {
+        use zeroize::Zeroize;
+        match self {
+            Self::Literal { value } => value.zeroize(),
+            Self::JsonString { .. } => {}
+            Self::Sequence { items } => items.iter_mut().for_each(Self::clear_private),
+            Self::Choice { alternatives } => alternatives.iter_mut().for_each(Self::clear_private),
+        }
+    }
+}
+
 /// One generation call's inputs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationRequest {
@@ -60,6 +94,10 @@ pub struct GenerationRequest {
     /// Retained context rendered only by a declared session template.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub context: String,
+    /// Optional constrained decoding policy. Unsupported providers must refuse
+    /// it. The exact policy travels with durable requests and checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_grammar: Option<OutputGrammar>,
     /// Hard cap on generated fragments/tokens.
     pub max_tokens: usize,
     /// Sampling temperature; `0.0` = deterministic/greedy. Stub providers
@@ -82,6 +120,10 @@ impl GenerationRequest {
     /// Clear persona text retained by a stopped actor or checkpoint.
     pub fn clear_private(&mut self) {
         use zeroize::Zeroize;
+        if let Some(grammar) = &mut self.output_grammar {
+            grammar.clear_private();
+        }
+        self.output_grammar = None;
         self.prompt.zeroize();
         self.context.zeroize();
         for stop in &mut self.stop {
@@ -103,6 +145,7 @@ impl Default for GenerationRequest {
         Self {
             prompt: String::new(),
             context: String::new(),
+            output_grammar: None,
             max_tokens: 256,
             temperature: 0.0,
             top_p: None,
@@ -144,7 +187,7 @@ impl std::fmt::Display for InferError {
         match self {
             InferError::PromptTooLong { length, limit } => {
                 write!(f, "prompt too long: {length} > {limit}")
-            },
+            }
             InferError::Interrupted => write!(f, "generation interrupted at a token boundary"),
             InferError::ModelNotLoaded => write!(f, "model not loaded"),
             InferError::Backend(msg) => write!(f, "backend: {msg}"),
@@ -154,7 +197,7 @@ impl std::fmt::Display for InferError {
             InferError::InvalidWeights(msg) => write!(f, "invalid weights: {msg}"),
             InferError::Unsupported { feature, detail } => {
                 write!(f, "unsupported {feature}: {detail}")
-            },
+            }
         }
     }
 }
@@ -169,8 +212,8 @@ pub struct SessionIdentity {
 }
 
 /// Portable generation state. KV tensors are deliberately absent. `request`
-/// contains the rendered prompt, and `draws` counts committed sampling draws,
-/// including a terminating EOS draw. A host commits this before publishing it.
+/// contains the rendered prompt, and `draws` counts committed sampling positions,
+/// including forced grammar tokens and a terminating EOS draw. A host commits this before publishing it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationCheckpoint {

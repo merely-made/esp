@@ -29,6 +29,7 @@ pub mod attention;
 #[cfg(not(target_family = "wasm"))]
 pub mod checkpoint;
 pub mod config;
+mod constraint;
 pub mod generate;
 #[cfg(feature = "decoder-wgpu")]
 pub mod gpu_probe;
