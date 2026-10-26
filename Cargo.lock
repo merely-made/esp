@@ -3727,7 +3727,7 @@ dependencies = [
 [[package]]
 name = "insigne"
 version = "0.0.2"
-source = "git+https://github.com/merely-made/dramatis.git?branch=main#0c537848dbd2ba3f29810555eaa4df716050c2f3"
+source = "git+https://github.com/merely-made/dramatis.git?branch=main#b4f5aa0c369d6103a2446846977d01713abe806a"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -4888,7 +4888,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "personae"
 version = "0.3.0"
-source = "git+https://github.com/merely-made/dramatis.git?branch=main#0c537848dbd2ba3f29810555eaa4df716050c2f3"
+source = "git+https://github.com/merely-made/dramatis.git?branch=main#b4f5aa0c369d6103a2446846977d01713abe806a"
 dependencies = [
  "blake3",
  "chacha20poly1305",
